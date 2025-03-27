@@ -335,7 +335,9 @@ name = "exhume_filesystem"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "exhume_body",
  "exhume_extfs",
+ "exhume_lvm",
  "serde",
  "serde_json",
 ]
