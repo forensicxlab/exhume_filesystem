@@ -304,9 +304,24 @@ dependencies = [
 
 [[package]]
 name = "exhume_body"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
+ "clap-num",
+ "env_logger",
+ "flate2",
+ "glob",
+ "log",
+]
+
+[[package]]
+name = "exhume_body"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd696553b7206975b68a9cd0a9ea33abfbdc65eca0b496ee27c80318c38eae73"
+dependencies = [
+ "clap",
+ "clap-num",
  "env_logger",
  "flate2",
  "glob",
@@ -321,8 +336,7 @@ dependencies = [
  "clap",
  "clap-num",
  "env_logger",
- "exhume_body",
- "exhume_lvm",
+ "exhume_body 0.1.1",
  "exhume_partitions",
  "log",
  "prettytable-rs",
@@ -335,7 +349,7 @@ name = "exhume_filesystem"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "exhume_body",
+ "exhume_body 0.1.1",
  "exhume_extfs",
  "exhume_lvm",
  "serde",
@@ -351,7 +365,7 @@ dependencies = [
  "clap",
  "clap-num",
  "env_logger",
- "exhume_body",
+ "exhume_body 0.1.1",
  "log",
  "nom",
  "prettytable-rs",
@@ -368,7 +382,7 @@ dependencies = [
  "capstone",
  "clap",
  "env_logger",
- "exhume_body",
+ "exhume_body 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "glob",
  "log",
  "prettytable-rs",
