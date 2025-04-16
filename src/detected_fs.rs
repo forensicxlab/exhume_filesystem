@@ -1,4 +1,4 @@
-use crate::filesystem::{Filesystem, LinuxFile};
+use crate::filesystem::{File, Filesystem};
 use exhume_body::{Body, BodySlice};
 use exhume_extfs::ExtFS;
 use std::error::Error;
@@ -9,8 +9,8 @@ pub enum DetectedFs<T: Read + Seek> {
 }
 
 impl<T: Read + Seek> Filesystem for DetectedFs<T> {
-    type InodeType = <ExtFS<T> as Filesystem>::InodeType;
-    type DirEntryType = <ExtFS<T> as Filesystem>::DirEntryType;
+    type FileType = <ExtFS<T> as Filesystem>::FileType;
+    type DirectoryType = <ExtFS<T> as Filesystem>::DirectoryType;
 
     fn filesystem_type(&self) -> String {
         match self {
@@ -33,14 +33,14 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
-    fn read_inode(&mut self, inode_num: u64) -> Result<Self::InodeType, Box<dyn Error>> {
+    fn read_inode(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>> {
         match self {
             DetectedFs::Ext(fs) => fs.get_inode(inode_num),
             // DetectedFs::Xfs(fs) => fs.read_inode(inode_num),
         }
     }
 
-    fn read_file_content(&mut self, inode: &Self::InodeType) -> Result<Vec<u8>, Box<dyn Error>> {
+    fn read_file_content(&mut self, inode: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>> {
         match self {
             DetectedFs::Ext(fs) => fs.read_file_content(inode),
             // DetectedFs::Xfs(fs) => fs.read_file_content(inode),
@@ -49,8 +49,8 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
 
     fn list_dir(
         &mut self,
-        inode: &Self::InodeType,
-    ) -> Result<Vec<Self::DirEntryType>, Box<dyn Error>> {
+        inode: &Self::FileType,
+    ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>> {
         match self {
             DetectedFs::Ext(fs) => fs.list_dir(inode),
             // DetectedFs::Xfs(fs) => fs.list_dir(inode),
@@ -64,14 +64,9 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
-    fn inode_to_linuxfile(
-        &self,
-        inode: &Self::InodeType,
-        inode_num: u64,
-        absolute_path: &str,
-    ) -> LinuxFile {
+    fn record_to_file(&self, inode: &Self::FileType, inode_num: u64, absolute_path: &str) -> File {
         match self {
-            DetectedFs::Ext(fs) => fs.inode_to_linuxfile(inode, inode_num, absolute_path),
+            DetectedFs::Ext(fs) => fs.record_to_file(inode, inode_num, absolute_path),
             // DetectedFs::Xfs(fs) => fs.inode_to_linuxfile(inode, inode_num, absolute_path),
         }
     }
@@ -91,10 +86,9 @@ pub fn detect_filesystem(
         return Ok(DetectedFs::Ext(ext_fs));
     }
 
-    // If you support additional filesystems, try them here...
-    // For example:
-    // if let Ok(lvm_fs) = Lvm2::open(partition) {
-    //     return Ok(DetectedFs::Lvm(lvm_fs));
+    // In the future
+    // if let Ok(ntfs) = NTFS::open(partition) {
+    //     return Ok(DetectedFs::NTFS(ntfs));
     // }
 
     Err(format!("No supported filesystem detected at offset {}", offset).into())

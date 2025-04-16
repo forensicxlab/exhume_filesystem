@@ -10,8 +10,8 @@ pub struct FsInfo {
     pub metadata: Value,
 }
 
-/// A trait for common inode functionality.
-pub trait InodeCommon {
+/// A trait for common file record functionality.
+pub trait FileCommon {
     /// Returns the size of the file.
     fn size(&self) -> u64;
     /// Returns true if the inode represents a directory.
@@ -27,11 +27,22 @@ pub trait InodeCommon {
 }
 
 /// A trait for common directory entry functionality.
-pub trait DirEntryCommon {
-    /// Returns the inode number associated with this directory entry.
-    fn inode(&self) -> u32;
-    /// Returns the name of the directory entry.
+pub trait DirectoryCommon {
+    /// Returns the file identifier associated with this directory entry.
+    fn file_id(&self) -> u32;
+    /// Returns the name of the directory.
     fn name(&self) -> &str;
+}
+
+// A cross-filesystem Exhume File abstraction
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct File {
+    pub identifier: u64, // All files have an identifier (eg. inode for Linux, record number for NTFS,...)
+    pub absolute_path: String, // All files have an absolute path
+    pub name: String,    // All files have a name
+    pub ftype: String,   // All files have a type
+    pub size: u64,
+    pub metadata: Value, // All files have their own specific attributes/metadata
 }
 
 /// A local representation of a Linux File metadata.
@@ -84,25 +95,20 @@ impl LinuxFile {
     }
 }
 
-/// The Filesystem trait now requires that its associated types implement the common traits.
+/// The Filesystem trait
 pub trait Filesystem {
-    type InodeType: InodeCommon;
-    type DirEntryType: DirEntryCommon;
+    type FileType: FileCommon;
+    type DirectoryType: DirectoryCommon;
 
     fn filesystem_type(&self) -> String;
     fn block_size(&self) -> u64;
     fn read_superblock(&self) -> Result<Value, Box<dyn Error>>;
-    fn read_inode(&mut self, inode_num: u64) -> Result<Self::InodeType, Box<dyn Error>>;
-    fn read_file_content(&mut self, inode: &Self::InodeType) -> Result<Vec<u8>, Box<dyn Error>>;
+    fn read_inode(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>>;
+    fn read_file_content(&mut self, inode: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
     fn list_dir(
         &mut self,
-        inode: &Self::InodeType,
-    ) -> Result<Vec<Self::DirEntryType>, Box<dyn Error>>;
+        inode: &Self::FileType,
+    ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
     fn read_file_by_path(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn Error>>;
-    fn inode_to_linuxfile(
-        &self,
-        inode: &Self::InodeType,
-        inode_num: u64,
-        absolute_path: &str,
-    ) -> LinuxFile;
+    fn record_to_file(&self, file: &Self::FileType, inode_num: u64, absolute_path: &str) -> File;
 }
