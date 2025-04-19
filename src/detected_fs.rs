@@ -1,11 +1,13 @@
 use crate::filesystem::{File, Filesystem};
 use exhume_body::{Body, BodySlice};
 use exhume_extfs::ExtFS;
+use log::info;
 use std::error::Error;
 use std::io::{Read, Seek};
 
 pub enum DetectedFs<T: Read + Seek> {
     Ext(ExtFS<T>),
+    //Add our next supported fs here.
 }
 
 impl<T: Read + Seek> Filesystem for DetectedFs<T> {
@@ -26,16 +28,16 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
-    fn read_superblock(&self) -> Result<serde_json::Value, Box<dyn Error>> {
+    fn read_metadata(&self) -> Result<serde_json::Value, Box<dyn Error>> {
         match self {
-            DetectedFs::Ext(fs) => fs.read_superblock(),
-            // DetectedFs::Xfs(fs) => fs.read_superblock(),
+            DetectedFs::Ext(fs) => fs.read_metadata(),
+            // DetectedFs::Xfs(fs) => fs.read_metadata(),
         }
     }
 
-    fn read_inode(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>> {
+    fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
         match self {
-            DetectedFs::Ext(fs) => fs.get_inode(inode_num),
+            DetectedFs::Ext(fs) => fs.get_inode(file_id),
             // DetectedFs::Xfs(fs) => fs.read_inode(inode_num),
         }
     }
@@ -83,6 +85,7 @@ pub fn detect_filesystem(
 
     // Try to initialize an ExtFS instance.
     if let Ok(ext_fs) = ExtFS::new(partition) {
+        info!("Detected an Extended filesystem.");
         return Ok(DetectedFs::Ext(ext_fs));
     }
 

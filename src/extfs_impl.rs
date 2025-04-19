@@ -1,6 +1,5 @@
 use crate::filesystem::{DirectoryCommon, FileCommon};
 use crate::filesystem::{File, Filesystem};
-//use chrono::{TimeZone, Utc};
 use exhume_extfs::ExtFS;
 use exhume_extfs::direntry::DirEntry;
 use exhume_extfs::inode::Inode;
@@ -10,23 +9,23 @@ use std::io::{Read, Seek};
 use std::path::Path;
 
 impl FileCommon for Inode {
+    fn id(&self) -> u64 {
+        self.i_num
+    }
+
     fn size(&self) -> u64 {
         self.size()
     }
     fn is_dir(&self) -> bool {
         self.is_dir()
     }
-    fn is_regular_file(&self) -> bool {
-        self.is_regular_file()
+
+    fn to_string(&self) -> String {
+        self.to_string()
     }
-    fn is_symlink(&self) -> bool {
-        self.is_symlink()
-    }
-    fn uid(&self) -> u32 {
-        self.uid()
-    }
-    fn gid(&self) -> u32 {
-        self.gid()
+
+    fn to_json(&self) -> Value {
+        self.to_json()
     }
 }
 
@@ -36,6 +35,14 @@ impl DirectoryCommon for DirEntry {
     }
     fn name(&self) -> &str {
         &self.name
+    }
+    /// Return the string representation of a File
+    fn to_string(&self) -> String {
+        self.to_string()
+    }
+    /// Return the json representation of a File
+    fn to_json(&self) -> Value {
+        self.to_json()
     }
 }
 
@@ -51,11 +58,11 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         self.superblock.block_size()
     }
 
-    fn read_superblock(&self) -> Result<Value, Box<dyn Error>> {
+    fn read_metadata(&self) -> Result<Value, Box<dyn Error>> {
         Ok(self.superblock.to_json())
     }
 
-    fn read_inode(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>> {
+    fn get_file(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>> {
         self.get_inode(inode_num)
     }
 

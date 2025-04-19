@@ -1,7 +1,10 @@
-use chrono::{TimeZone, Utc};
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
+use std::fmt;
+use std::fs::File as StdFile;
+use std::io::Write;
 
 #[derive(Serialize, Deserialize)]
 pub struct FsInfo {
@@ -12,18 +15,16 @@ pub struct FsInfo {
 
 /// A trait for common file record functionality.
 pub trait FileCommon {
-    /// Returns the size of the file.
+    /// Return the unique file identifier
+    fn id(&self) -> u64;
+    /// Returns the size of the record.
     fn size(&self) -> u64;
-    /// Returns true if the inode represents a directory.
+    /// Returns true if the record represents a directory.
     fn is_dir(&self) -> bool;
-    /// Returns true if the inode represents a regular file.
-    fn is_regular_file(&self) -> bool;
-    /// Returns true if the inode represents a symlink.
-    fn is_symlink(&self) -> bool;
-    /// Returns the user ID of the owner.
-    fn uid(&self) -> u32;
-    /// Returns the group ID of the owner.
-    fn gid(&self) -> u32;
+    /// Return the string representation of a File
+    fn to_string(&self) -> String;
+    /// Return the json representation of a File
+    fn to_json(&self) -> Value;
 }
 
 /// A trait for common directory entry functionality.
@@ -32,6 +33,10 @@ pub trait DirectoryCommon {
     fn file_id(&self) -> u32;
     /// Returns the name of the directory.
     fn name(&self) -> &str;
+    /// Return the string representation of a File
+    fn to_string(&self) -> String;
+    /// Return the json representation of a File
+    fn to_json(&self) -> Value;
 }
 
 // A cross-filesystem Exhume File abstraction
@@ -45,53 +50,10 @@ pub struct File {
     pub metadata: Value, // All files have their own specific attributes/metadata
 }
 
-/// A local representation of a Linux File metadata.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LinuxFile {
-    pub evidence_id: Option<i64>,
-    pub absolute_path: String,
-    pub filename: String,
-    pub parent_directory: String,
-    pub inode_number: u32,
-    pub file_type: String, // e.g., "dir", "file", "symlink", "other"
-    pub size_bytes: u64,
-    pub owner_uid: u32,
-    pub group_gid: u32,
-    pub permissions_mode: u32,
-    pub hard_link_count: u16,
-    pub access_time: String,
-    pub modification_time: String,
-    pub change_time: String,
-    pub creation_time: String,
-    pub extended_attributes: Value,
-    pub symlink_target: Option<String>,
-    pub mount_point: String,
-    pub filesystem_type: String,
-}
-
-impl LinuxFile {
-    /// Sets time-related fields from Unix epoch seconds.
-    pub fn set_times(&mut self, atime: i64, mtime: i64, ctime: i64, crtime: i64) {
-        self.access_time = Utc
-            .timestamp_opt(atime, 0)
-            .single()
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default();
-        self.modification_time = Utc
-            .timestamp_opt(mtime, 0)
-            .single()
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default();
-        self.change_time = Utc
-            .timestamp_opt(ctime, 0)
-            .single()
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default();
-        self.creation_time = Utc
-            .timestamp_opt(crtime, 0)
-            .single()
-            .map(|dt| dt.to_rfc3339())
-            .unwrap_or_default();
+impl fmt::Display for File {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.write_str("test")?;
+        Ok(())
     }
 }
 
@@ -102,13 +64,43 @@ pub trait Filesystem {
 
     fn filesystem_type(&self) -> String;
     fn block_size(&self) -> u64;
-    fn read_superblock(&self) -> Result<Value, Box<dyn Error>>;
-    fn read_inode(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>>;
-    fn read_file_content(&mut self, inode: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
+    fn read_metadata(&self) -> Result<Value, Box<dyn Error>>;
+    fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
+    fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
     fn list_dir(
         &mut self,
         inode: &Self::FileType,
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
     fn read_file_by_path(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn Error>>;
     fn record_to_file(&self, file: &Self::FileType, inode_num: u64, absolute_path: &str) -> File;
+    fn dump(&mut self, file: &Self::FileType) {
+        info!(
+            "Dumping file {} content into 'file_{}.bin'",
+            file.id(),
+            file.id()
+        );
+
+        match &self.read_file_content(file) {
+            Ok(data) => {
+                let filename = format!("file_{}.bin", file.id());
+                match StdFile::create(&filename) {
+                    Ok(mut f) => {
+                        if let Err(e) = f.write_all(&data) {
+                            error!("Error writing file '{}': {}", filename, e);
+                        } else {
+                            info!(
+                                "Successfully wrote {} bytes into '{}'",
+                                data.len(),
+                                filename
+                            );
+                        }
+                    }
+                    Err(e) => error!("Could not create dump file '{}': {}", filename, e),
+                }
+            }
+            Err(e) => {
+                error!("Cannot read content for inode {}: {}", file.id(), e);
+            }
+        }
+    }
 }

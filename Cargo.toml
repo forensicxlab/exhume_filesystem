@@ -6,7 +6,10 @@ edition = "2024"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
 exhume_body = "=0.1.1"
 exhume_extfs = { path = "../exhume_extfs" }
 exhume_lvm = { path = "../exhume_lvm" }
+log = "0.4.25"
+clap = "4.0"
+clap-num = "1.1.1"
+env_logger = "0.11.6"
