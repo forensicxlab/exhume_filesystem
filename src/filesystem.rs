@@ -63,6 +63,7 @@ pub trait Filesystem {
     type DirectoryType: DirectoryCommon;
 
     fn filesystem_type(&self) -> String;
+    fn record_count(&self) -> u64;
     fn block_size(&self) -> u64;
     fn read_metadata(&self) -> Result<Value, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
@@ -73,6 +74,9 @@ pub trait Filesystem {
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
     fn read_file_by_path(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn Error>>;
     fn record_to_file(&self, file: &Self::FileType, inode_num: u64, absolute_path: &str) -> File;
+    //fn enumerate(&mut self) -> Result<Vec<Self::FileType>, Box<dyn Error>>;
+    fn enumerate(&mut self) -> Result<(), Box<dyn Error>>;
+
     fn dump(&mut self, file: &Self::FileType) {
         info!(
             "Dumping file {} content into 'file_{}.bin'",

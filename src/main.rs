@@ -188,4 +188,14 @@ fn main() {
             filesystem.dump(&file);
         }
     }
+
+    if enumerate {
+        match filesystem.enumerate() {
+            Ok(_) => {}
+            Err(err) => {
+                error!("Could not enumerate the files: {:?}", err);
+                return;
+            }
+        }
+    }
 }

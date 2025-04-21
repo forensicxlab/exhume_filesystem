@@ -21,6 +21,12 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
+    fn record_count(&self) -> u64 {
+        match self {
+            DetectedFs::Ext(fs) => fs.record_count(),
+        }
+    }
+
     fn block_size(&self) -> u64 {
         match self {
             DetectedFs::Ext(fs) => fs.block_size(),
@@ -56,6 +62,12 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         match self {
             DetectedFs::Ext(fs) => fs.list_dir(inode),
             // DetectedFs::Xfs(fs) => fs.list_dir(inode),
+        }
+    }
+
+    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
+        match self {
+            DetectedFs::Ext(fs) => fs.enumerate(),
         }
     }
 
