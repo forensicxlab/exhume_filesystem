@@ -1,6 +1,6 @@
 [package]
 name = "exhume_filesystem"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "This exhume module is proposing a standard abstraction layer of a FileSystem, File and Directory for any exhume filesystem modules (extfs, ...)."
 documentation = "https://www.forensicxlab.com/docs/category/exhume---filesystem"

@@ -148,7 +148,8 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
             );
 
             println!(
-                "{} {} {} {} {:>5} {} {}",
+                "[{}] - {} {} {} {} {:>5} {} {}",
+                inode.id(),
                 perm_str,
                 inode.i_links_count,
                 inode.uid(),
