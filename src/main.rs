@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 fn main() {
     let matches = Command::new("exhume_filesystem")
-        .version("1.0")
+        .version("0.1.0")
         .author("ForensicXlab")
         .about("Exhume in a standardized way files & directories from a given filesystem.")
         .arg(
