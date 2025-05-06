@@ -32,8 +32,8 @@ impl FileCommon for Inode {
 }
 
 impl DirectoryCommon for DirEntry {
-    fn file_id(&self) -> u32 {
-        self.inode
+    fn file_id(&self) -> u64 {
+        self.inode as u64
     }
     fn name(&self) -> &str {
         &self.name
@@ -56,7 +56,7 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         "Extended File System".to_string()
     }
 
-    fn record_count(&self) -> u64 {
+    fn record_count(&mut self) -> u64 {
         self.superblock.s_inodes_count
     }
 
@@ -81,10 +81,6 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         inode: &Self::FileType,
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>> {
         self.list_dir(inode)
-    }
-
-    fn read_file_by_path(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-        self.read_file_by_path(path)
     }
 
     // Record to File object implementation for ExtFS

@@ -30,7 +30,7 @@ pub trait FileCommon {
 /// A trait for common directory entry functionality.
 pub trait DirectoryCommon {
     /// Returns the file identifier associated with this directory entry.
-    fn file_id(&self) -> u32;
+    fn file_id(&self) -> u64;
     /// Returns the name of the directory.
     fn name(&self) -> &str;
     /// Return the string representation of a File
@@ -63,7 +63,7 @@ pub trait Filesystem {
     type DirectoryType: DirectoryCommon;
 
     fn filesystem_type(&self) -> String;
-    fn record_count(&self) -> u64;
+    fn record_count(&mut self) -> u64;
     fn block_size(&self) -> u64;
     fn read_metadata(&self) -> Result<Value, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
@@ -72,8 +72,7 @@ pub trait Filesystem {
         &mut self,
         inode: &Self::FileType,
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
-    fn read_file_by_path(&mut self, path: &str) -> Result<Vec<u8>, Box<dyn Error>>;
-    fn record_to_file(&self, file: &Self::FileType, inode_num: u64, absolute_path: &str) -> File;
+    fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
     //fn enumerate(&mut self) -> Result<Vec<Self::FileType>, Box<dyn Error>>;
     fn enumerate(&mut self) -> Result<(), Box<dyn Error>>;
 

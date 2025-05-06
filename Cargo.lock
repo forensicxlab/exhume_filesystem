@@ -101,6 +101,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "cc"
 version = "1.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -260,9 +266,9 @@ dependencies = [
 
 [[package]]
 name = "exhume_body"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd696553b7206975b68a9cd0a9ea33abfbdc65eca0b496ee27c80318c38eae73"
+checksum = "5b613cf600d4b0b6fc0ac79ec7f34955f9b9aaca73a00ce8c578e370d826736d"
 dependencies = [
  "clap",
  "clap-num",
@@ -274,9 +280,9 @@ dependencies = [
 
 [[package]]
 name = "exhume_extfs"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75517270ae5ff595ed09667a5476b08a13faf0d53b1280955c8106418a03d370"
+checksum = "ad62d807b982eed3b9defb32d177a321f17303154096e00db00ddf3a12184d5f"
 dependencies = [
  "chrono",
  "clap",
@@ -291,14 +297,33 @@ dependencies = [
 
 [[package]]
 name = "exhume_filesystem"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "clap-num",
  "env_logger",
  "exhume_body",
  "exhume_extfs",
+ "exhume_ntfs",
  "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "exhume_ntfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0142515a8e7d4f5bcb6cde14840b5436a82feee715f8ebddd8ce9792d41d455b"
+dependencies = [
+ "byteorder",
+ "chrono",
+ "clap",
+ "clap-num",
+ "env_logger",
+ "exhume_body",
+ "log",
+ "prettytable-rs",
  "serde",
  "serde_json",
 ]

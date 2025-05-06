@@ -4,6 +4,7 @@ use exhume_body::Body;
 use exhume_filesystem::Filesystem;
 use exhume_filesystem::detected_fs::detect_filesystem;
 use exhume_filesystem::filesystem::DirectoryCommon;
+use exhume_filesystem::filesystem::FileCommon;
 use log::{debug, error, info};
 use serde_json::{Value, json};
 
@@ -46,17 +47,21 @@ fn main() {
         )
 
         .arg(
-            Arg::new("identifier")
-                .short('i')
-                .long("identifier")
+            Arg::new("record")
+                .short('r')
+                .long("record")
                 .value_parser(maybe_hex::<usize>)
-                .help("Display the metadata about a specific file using its identifier."),
+                .help("Display the metadata about a specific file record using its record identifier."),
         )
 
         .arg(
             Arg::new("enum")
                 .short('e')
                 .long("enum")
+                .conflicts_with("dump")
+                .conflicts_with("list")
+                .conflicts_with("record")
+                .conflicts_with("json")
                 .action(ArgAction::SetTrue)
                 .help("Enumerate all file records"),
         )
@@ -64,19 +69,15 @@ fn main() {
             Arg::new("list")
                 .long("list")
                 .action(ArgAction::SetTrue)
-                .help("If --file is specified and if it is a directory, list the entries inside."),
+                .requires("record")
+                .help("If --record is specified and if it is a directory, list the entries inside."),
         )
         .arg(
             Arg::new("dump")
                 .long("dump")
                 .action(ArgAction::SetTrue)
-                .help("If --file is specified, dump the content to a file named 'file_<N>.bin'."),
-        )
-        .arg(
-            Arg::new("metadata")
-                .long("metadata")
-                .action(ArgAction::SetTrue)
-                .help("If --file is specified, display the specific underlying filesystem specific metadata."),
+                .requires("record")
+                .help("If --record is specified, dump the content to a file named 'file_<N>.bin'."),
         )
 
         .arg(
@@ -114,21 +115,21 @@ fn main() {
     let offset = matches.get_one::<u64>("offset").unwrap();
     let size = matches.get_one::<u64>("size").unwrap();
 
-    let file_id = matches.get_one::<usize>("identifier").copied().unwrap_or(0);
+    let file_id = matches.get_one::<usize>("record").copied().unwrap_or(0);
     let list = matches.get_flag("list");
     let enumerate = matches.get_flag("enum");
     let dump = matches.get_flag("dump");
     let json_output = matches.get_flag("json");
 
-    let mut body = Body::new(file_path.to_owned(), format);
+    let body = Body::new(file_path.to_owned(), format);
     debug!("Created Body from '{}'", file_path);
 
     let partition_size = *size * body.get_sector_size() as u64;
 
-    let mut filesystem = match detect_filesystem(&mut body, *offset, partition_size) {
+    let mut filesystem = match detect_filesystem(&body, *offset, partition_size) {
         Ok(fs) => fs,
-        Err(err) => {
-            error!("Could not detect the provided filesystem: {:?}", err);
+        Err(e) => {
+            error!("Could not detect the provided filesystem: {e:?}");
             return;
         }
     };
