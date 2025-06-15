@@ -2,7 +2,6 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
-use std::fmt;
 use std::fs::File as StdFile;
 use std::io::Write;
 
@@ -48,13 +47,6 @@ pub struct File {
     pub ftype: String,   // All files have a type
     pub size: u64,
     pub metadata: Value, // All files have their own specific attributes/metadata
-}
-
-impl fmt::Display for File {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.write_str("test")?;
-        Ok(())
-    }
 }
 
 /// The Filesystem trait
