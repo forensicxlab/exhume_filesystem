@@ -107,6 +107,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
+name = "capstone"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "015ef5d5ca1743e3f94af9509ba6bd2886523cfee46e48d15c2ef5216fd4ac9a"
+dependencies = [
+ "capstone-sys",
+ "libc",
+]
+
+[[package]]
+name = "capstone-sys"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2267cb8d16a1e4197863ec4284ffd1aec26fe7e57c58af46b02590a0235809a0"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -266,9 +286,9 @@ dependencies = [
 
 [[package]]
 name = "exhume_body"
-version = "0.3.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38cb97e4f83d267de104a76f456e73430e576772a0723fe8ebe8378e6d498563"
+checksum = "548d96bf0663e21bf6e6283572daac648d384c51bb6780526cee525475808e93"
 dependencies = [
  "clap",
  "clap-num",
@@ -283,9 +303,9 @@ dependencies = [
 
 [[package]]
 name = "exhume_extfs"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d80b3cb0e647b90d80bc9571c2194c938b953628d0dfde6459c8a04ba7726147"
+checksum = "8b3409588d114cb9269a589c8367ad208271e95fd0ffdf89844b3173b77f178f"
 dependencies = [
  "byteorder",
  "chrono",
@@ -301,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "exhume_filesystem"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "clap",
  "clap-num",
@@ -316,11 +336,12 @@ dependencies = [
 
 [[package]]
 name = "exhume_ntfs"
-version = "0.1.3"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac519d975f7c6fa2f9e18530140f1db8694cca6520df892b8b1c6ef6725323c"
+checksum = "1efa9069e760895eb049f091455fe66c9598b3de895baeac4bc472b4349054a7"
 dependencies = [
  "byteorder",
+ "capstone",
  "chrono",
  "clap",
  "clap-num",
