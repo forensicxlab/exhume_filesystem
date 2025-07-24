@@ -115,10 +115,17 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
-    fn read_metadata(&self) -> Result<serde_json::Value, Box<dyn Error>> {
+    fn get_metadata(&self) -> Result<serde_json::Value, Box<dyn Error>> {
         match self {
-            DetectedFs::Ext(fs) => fs.read_metadata(),
-            DetectedFs::Ntfs(fs) => fs.read_metadata(),
+            DetectedFs::Ext(fs) => fs.get_metadata(),
+            DetectedFs::Ntfs(fs) => fs.get_metadata(),
+        }
+    }
+
+    fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>> {
+        match self {
+            DetectedFs::Ext(fs) => fs.get_metadata_pretty(),
+            DetectedFs::Ntfs(fs) => fs.get_metadata_pretty(),
         }
     }
 

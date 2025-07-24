@@ -81,6 +81,20 @@ fn main() {
         )
 
         .arg(
+            Arg::new("print")
+                .long("print")
+                .action(ArgAction::SetTrue)
+                .requires("record")
+                .help("If --record is specified, print the content of the record to STDOUT."),
+        )
+
+        .arg(
+            Arg::new("metadata")
+                .long("metadata")
+                .action(ArgAction::SetTrue)
+                .help("Print the filsystem metadata (JSON)."),
+        )
+        .arg(
             Arg::new("json")
                 .short('j')
                 .long("json")
@@ -118,6 +132,8 @@ fn main() {
     let file_id = matches.get_one::<usize>("record").copied().unwrap_or(0);
     let list = matches.get_flag("list");
     let enumerate = matches.get_flag("enum");
+    let metadata = matches.get_flag("metadata");
+    let print = matches.get_flag("print");
     let dump = matches.get_flag("dump");
     let json_output = matches.get_flag("json");
 
@@ -133,6 +149,19 @@ fn main() {
             return;
         }
     };
+
+    if metadata {
+        if json_output {
+            match serde_json::to_string_pretty(&filesystem.get_metadata().unwrap()) {
+                Ok(json_str) => {
+                    println!("{}", json_str)
+                }
+                Err(e) => error!("Error serializing inode {} to JSON: {}", file_id, e),
+            }
+        } else {
+            println!("{}", &filesystem.get_metadata_pretty().unwrap());
+        }
+    }
 
     if file_id > 0 {
         let file = match filesystem.get_file(file_id as u64) {
@@ -186,7 +215,11 @@ fn main() {
         }
 
         if dump {
-            filesystem.dump(&file);
+            filesystem.dump_to_fs(&file);
+        }
+
+        if print {
+            filesystem.dump_to_std(&file);
         }
     }
 

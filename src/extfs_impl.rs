@@ -31,6 +31,28 @@ impl FileCommon for Inode {
     }
 }
 
+pub fn format_unix_permissions(inode: &Inode) -> String {
+    format!(
+        "{}{}{}{}{}{}{}{}{}{}",
+        if inode.is_dir() {
+            'd'
+        } else if inode.is_symlink() {
+            'l'
+        } else {
+            '-'
+        },
+        if inode.mode() & 0o400 != 0 { 'r' } else { '-' },
+        if inode.mode() & 0o200 != 0 { 'w' } else { '-' },
+        if inode.mode() & 0o100 != 0 { 'x' } else { '-' },
+        if inode.mode() & 0o040 != 0 { 'r' } else { '-' },
+        if inode.mode() & 0o020 != 0 { 'w' } else { '-' },
+        if inode.mode() & 0o010 != 0 { 'x' } else { '-' },
+        if inode.mode() & 0o004 != 0 { 'r' } else { '-' },
+        if inode.mode() & 0o002 != 0 { 'w' } else { '-' },
+        if inode.mode() & 0o001 != 0 { 'x' } else { '-' }
+    )
+}
+
 impl DirectoryCommon for DirEntry {
     fn file_id(&self) -> u64 {
         self.inode as u64
@@ -64,8 +86,12 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         self.superblock.block_size()
     }
 
-    fn read_metadata(&self) -> Result<Value, Box<dyn Error>> {
+    fn get_metadata(&self) -> Result<Value, Box<dyn Error>> {
         Ok(self.superblock.to_json())
+    }
+
+    fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>> {
+        Ok(self.superblock.to_string())
     }
 
     fn get_file(&mut self, inode_num: u64) -> Result<Self::FileType, Box<dyn Error>> {
@@ -95,12 +121,19 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         }
 
         File {
+            id: None,
             identifier: inode_num,
             absolute_path: absolute_path.to_string(),
             name: match Path::new(absolute_path).file_name() {
                 Some(name) => name.to_string_lossy().to_string(),
                 None => absolute_path.to_string(),
             },
+            created: Some(inode.i_crtime as i64),
+            modified: Some(inode.i_mtime as i64),
+            accessed: Some(inode.i_atime as i64),
+            permissions: Some(format_unix_permissions(inode)),
+            owner: Some(format!("{}", inode.uid())),
+            group: Some(format!("{}", inode.gid())),
             ftype: file_type.clone(),
             size: inode.size(),
             metadata: inode.to_json(),
@@ -123,30 +156,10 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
             let inode = self.get_file(inode_num).expect("Could not get Inode.");
             let file_obj = self.record_to_file(&inode, inode_num, &path);
 
-            let perm_str = format!(
-                "{}{}{}{}{}{}{}{}{}{}",
-                if inode.is_dir() {
-                    'd'
-                } else if inode.is_symlink() {
-                    'l'
-                } else {
-                    '-'
-                },
-                if inode.mode() & 0o400 != 0 { 'r' } else { '-' },
-                if inode.mode() & 0o200 != 0 { 'w' } else { '-' },
-                if inode.mode() & 0o100 != 0 { 'x' } else { '-' },
-                if inode.mode() & 0o040 != 0 { 'r' } else { '-' },
-                if inode.mode() & 0o020 != 0 { 'w' } else { '-' },
-                if inode.mode() & 0o010 != 0 { 'x' } else { '-' },
-                if inode.mode() & 0o004 != 0 { 'r' } else { '-' },
-                if inode.mode() & 0o002 != 0 { 'w' } else { '-' },
-                if inode.mode() & 0o001 != 0 { 'x' } else { '-' }
-            );
-
             println!(
                 "[{}] - {} {} {} {} {:>5} {} {}",
                 inode.id(),
-                perm_str,
+                format_unix_permissions(&inode),
                 inode.i_links_count,
                 inode.uid(),
                 inode.gid(),

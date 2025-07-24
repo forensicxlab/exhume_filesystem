@@ -80,8 +80,12 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
         self.pbs.cluster_size() as u64
     }
 
-    fn read_metadata(&self) -> Result<Value, Box<dyn Error>> {
+    fn get_metadata(&self) -> Result<Value, Box<dyn Error>> {
         Ok(self.pbs.to_json())
+    }
+
+    fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>> {
+        Ok(self.pbs.to_string())
     }
 
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
@@ -106,9 +110,16 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
             .unwrap_or_else(|| format!("(MFT #{} – unnamed)", file_id));
 
         File {
+            id: None,
             identifier: file_id,
             absolute_path: absolute_path.to_owned(),
             name,
+            created: None,
+            modified: None,
+            accessed: None,
+            permissions: None,
+            owner: None,
+            group: None,
             ftype: if record.is_dir() { "Directory" } else { "File" }.into(),
             size: record.size(),
             metadata: record.to_json(),

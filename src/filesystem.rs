@@ -1,16 +1,10 @@
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::FromRow;
 use std::error::Error;
 use std::fs::File as StdFile;
 use std::io::Write;
-
-#[derive(Serialize, Deserialize)]
-pub struct FsInfo {
-    pub filesystem_type: String,
-    pub block_size: u64,
-    pub metadata: Value,
-}
 
 /// A trait for common file record functionality.
 pub trait FileCommon {
@@ -39,14 +33,22 @@ pub trait DirectoryCommon {
 }
 
 // A cross-filesystem Exhume File abstraction
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, FromRow)]
 pub struct File {
-    pub identifier: u64, // All files have an identifier (eg. inode for Linux, record number for NTFS,...)
-    pub absolute_path: String, // All files have an absolute path
-    pub name: String,    // All files have a name
-    pub ftype: String,   // All files have a type
-    pub size: u64,
-    pub metadata: Value, // All files have their own specific attributes/metadata
+    pub id: Option<i64>,       // Application-specific unique ID
+    pub identifier: u64,       // FS-specific unique ID (inode, MFT record, etc.)
+    pub absolute_path: String, // Full path from root
+    pub name: String,          // File name
+    pub ftype: String,         // File type (file, dir, symlink, etc.)
+    pub size: u64,             // Size in bytes
+    // We are normalizing all timestamps in UNIX Time for all filesystems
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+    pub accessed: Option<i64>,
+    pub permissions: Option<String>, // Permissions in some normalized form
+    pub owner: Option<String>,       // Owner user name or SID/UID
+    pub group: Option<String>,       // Group name or GID (Unix)
+    pub metadata: Value,             // Filesystem-specific extra metadata
 }
 
 /// The Filesystem trait
@@ -57,7 +59,8 @@ pub trait Filesystem {
     fn filesystem_type(&self) -> String;
     fn record_count(&mut self) -> u64;
     fn block_size(&self) -> u64;
-    fn read_metadata(&self) -> Result<Value, Box<dyn Error>>;
+    fn get_metadata(&self) -> Result<Value, Box<dyn Error>>;
+    fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
     fn list_dir(
@@ -65,10 +68,10 @@ pub trait Filesystem {
         inode: &Self::FileType,
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
     fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
-    //fn enumerate(&mut self) -> Result<Vec<Self::FileType>, Box<dyn Error>>;
+
     fn enumerate(&mut self) -> Result<(), Box<dyn Error>>;
 
-    fn dump(&mut self, file: &Self::FileType) {
+    fn dump_to_fs(&mut self, file: &Self::FileType) {
         info!(
             "Dumping file {} content into 'file_{}.bin'",
             file.id(),
@@ -92,6 +95,19 @@ pub trait Filesystem {
                     }
                     Err(e) => error!("Could not create dump file '{}': {}", filename, e),
                 }
+            }
+            Err(e) => {
+                error!("Cannot read content for inode {}: {}", file.id(), e);
+            }
+        }
+    }
+
+    fn dump_to_std(&mut self, file: &Self::FileType) {
+        info!("Displaying record {} content", file.id());
+
+        match &self.read_file_content(file) {
+            Ok(data) => {
+                println!("{}", String::from_utf8_lossy(&data));
             }
             Err(e) => {
                 error!("Cannot read content for inode {}: {}", file.id(), e);
