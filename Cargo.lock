@@ -534,8 +534,6 @@ dependencies = [
 [[package]]
 name = "exhume_extfs"
 version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b3409588d114cb9269a589c8367ad208271e95fd0ffdf89844b3173b77f178f"
 dependencies = [
  "byteorder",
  "chrono",
@@ -568,8 +566,6 @@ dependencies = [
 [[package]]
 name = "exhume_ntfs"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1efa9069e760895eb049f091455fe66c9598b3de895baeac4bc472b4349054a7"
 dependencies = [
  "byteorder",
  "capstone",

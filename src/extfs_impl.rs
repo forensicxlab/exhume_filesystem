@@ -102,6 +102,27 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         self.read_inode(inode)
     }
 
+    fn read_file_prefix(
+        &mut self,
+        inode: &Self::FileType,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        self.read_inode_prefix(inode, length)
+    }
+
+    fn get_root_file_id(&self) -> u64 {
+        return 2;
+    }
+
+    fn read_file_slice(
+        &mut self,
+        inode: &Self::FileType,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        self.read_inode_slice(inode, offset, length)
+    }
+
     fn list_dir(
         &mut self,
         inode: &Self::FileType,

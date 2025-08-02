@@ -144,6 +144,35 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
+    fn read_file_prefix(
+        &mut self,
+        record: &Self::FileType,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        match (self, record) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(inode)) => fs.read_file_prefix(inode, length),
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(rec)) => fs.read_file_prefix(rec, length),
+            _ => Err("filesystem / record variant mismatch".into()),
+        }
+    }
+
+    fn read_file_slice(
+        &mut self,
+        record: &Self::FileType,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        match (self, record) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(inode)) => {
+                fs.read_file_slice(inode, offset, length)
+            }
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(rec)) => {
+                fs.read_file_slice(rec, offset, length)
+            }
+            _ => Err("filesystem / record variant mismatch".into()),
+        }
+    }
+
     fn list_dir(
         &mut self,
         file: &Self::FileType,
@@ -163,6 +192,13 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         match self {
             DetectedFs::Ext(fs) => fs.enumerate(),
             DetectedFs::Ntfs(fs) => fs.enumerate(),
+        }
+    }
+
+    fn get_root_file_id(&self) -> u64 {
+        match self {
+            DetectedFs::Ext(fs) => fs.get_root_file_id(),
+            DetectedFs::Ntfs(fs) => fs.get_root_file_id(),
         }
     }
 

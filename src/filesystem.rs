@@ -63,12 +63,24 @@ pub trait Filesystem {
     fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
+    fn read_file_prefix(
+        &mut self,
+        file: &Self::FileType,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>>;
+    fn read_file_slice(
+        &mut self,
+        file: &Self::FileType,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>>;
+
     fn list_dir(
         &mut self,
         inode: &Self::FileType,
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
     fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
-
+    fn get_root_file_id(&self) -> u64;
     fn enumerate(&mut self) -> Result<(), Box<dyn Error>>;
 
     fn dump_to_fs(&mut self, file: &Self::FileType) {

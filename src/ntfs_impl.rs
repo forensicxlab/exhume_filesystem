@@ -96,6 +96,27 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
         self.read_file(record)
     }
 
+    fn read_file_prefix(
+        &mut self,
+        record: &Self::FileType,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        self.read_file_prefix(record, length)
+    }
+
+    fn get_root_file_id(&self) -> u64 {
+        return 5;
+    }
+
+    fn read_file_slice(
+        &mut self,
+        record: &Self::FileType,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        self.read_file_slice(record, offset, length)
+    }
+
     fn list_dir(
         &mut self,
         record: &Self::FileType,
