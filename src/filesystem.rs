@@ -57,6 +57,7 @@ pub trait Filesystem {
     type DirectoryType: DirectoryCommon;
 
     fn filesystem_type(&self) -> String;
+    fn path_separator(&self) -> String;
     fn record_count(&mut self) -> u64;
     fn block_size(&self) -> u64;
     fn get_metadata(&self) -> Result<Value, Box<dyn Error>>;

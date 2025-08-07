@@ -101,6 +101,13 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
+    fn path_separator(&self) -> String {
+        match self {
+            DetectedFs::Ext(fs) => fs.path_separator(),
+            DetectedFs::Ntfs(fs) => fs.path_separator(),
+        }
+    }
+
     fn record_count(&mut self) -> u64 {
         match self {
             DetectedFs::Ext(fs) => fs.record_count(),
@@ -214,8 +221,6 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 }
-
-// detected_fs.rs
 
 pub fn detect_filesystem(
     body: &Body,

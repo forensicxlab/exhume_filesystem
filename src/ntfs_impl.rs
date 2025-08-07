@@ -72,6 +72,10 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
         "NT File System".to_string()
     }
 
+    fn path_separator(&self) -> String {
+        "\\".to_string()
+    }
+
     fn record_count(&mut self) -> u64 {
         self.mft_records_count().unwrap_or(0)
     }

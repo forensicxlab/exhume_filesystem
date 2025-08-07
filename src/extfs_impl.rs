@@ -82,6 +82,10 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
         self.superblock.s_inodes_count
     }
 
+    fn path_separator(&self) -> String {
+        "/".to_string()
+    }
+
     fn block_size(&self) -> u64 {
         self.superblock.block_size()
     }
