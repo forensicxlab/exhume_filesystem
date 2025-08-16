@@ -42,9 +42,9 @@ pub struct File {
     pub ftype: String,         // File type (file, dir, symlink, etc.)
     pub size: u64,             // Size in bytes
     // We are normalizing all timestamps in UNIX Time for all filesystems
-    pub created: Option<i64>,
-    pub modified: Option<i64>,
-    pub accessed: Option<i64>,
+    pub created: Option<u64>,
+    pub modified: Option<u64>,
+    pub accessed: Option<u64>,
     pub permissions: Option<String>, // Permissions in some normalized form
     pub owner: Option<String>,       // Owner user name or SID/UID
     pub group: Option<String>,       // Group name or GID (Unix)
@@ -83,7 +83,6 @@ pub trait Filesystem {
     fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
     fn get_root_file_id(&self) -> u64;
     fn enumerate(&mut self) -> Result<(), Box<dyn Error>>;
-
     fn dump_to_fs(&mut self, file: &Self::FileType) {
         info!(
             "Dumping file {} content into 'file_{}.bin'",

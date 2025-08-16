@@ -1,11 +1,13 @@
 use crate::filesystem::{DirectoryCommon, FileCommon};
 use crate::filesystem::{File, Filesystem};
 use exhume_ntfs::NTFS;
-use exhume_ntfs::mft::{Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation};
+use exhume_ntfs::mft::{
+    Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation,
+    filetime_to_local_datetime,
+};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
-
-use serde_json::Value;
 use std::io::{Read, Seek};
 
 impl FileCommon for MFTRecord {
@@ -62,6 +64,13 @@ impl DirectoryCommon for DirectoryEntry {
     fn to_json(&self) -> Value {
         self.to_json()
     }
+}
+
+#[inline]
+fn filetime_to_unix_secs(ft: u64) -> u64 {
+    // FILETIME is 100ns since 1601-01-01; Unix is seconds since 1970-01-01
+    // 11_644_473_600 = seconds between 1601-01-01 and 1970-01-01
+    (ft / 10_000_000).saturating_sub(11_644_473_600)
 }
 
 impl<T: Read + Seek> Filesystem for NTFS<T> {
@@ -132,16 +141,42 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
     fn record_to_file(&self, record: &Self::FileType, file_id: u64, absolute_path: &str) -> File {
         let name = record
             .primary_name()
-            .unwrap_or_else(|| format!("(MFT #{} – unnamed)", file_id));
+            .unwrap_or_else(|| format!("(MFT #{} – unnamed)", file_id));
+
+        // Let's prefer $STANDARD_INFORMATION, fall back to first $FILE_NAME.
+        let (c_ft, mft_ft, a_ft) = record
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                Attribute::Resident { header, value, .. }
+                    if header.attr_type == AttributeType::StandardInformation =>
+                {
+                    StandardInformation::from_bytes(value)
+                        .map(|si| (si.created, si.mft_modified, si.accessed))
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                record
+                    .file_names()
+                    .into_iter()
+                    .next()
+                    .map(|fnm| (fnm.created, fnm.mft_modified, fnm.accessed))
+            })
+            .unwrap_or((0, 0, 0)); // if totally missing, leave zeros and map to None below
+
+        let created = (c_ft != 0).then(|| filetime_to_unix_secs(c_ft));
+        let modified = (mft_ft != 0).then(|| filetime_to_unix_secs(mft_ft));
+        let accessed = (a_ft != 0).then(|| filetime_to_unix_secs(a_ft));
 
         File {
             id: None,
             identifier: file_id,
             absolute_path: absolute_path.to_owned(),
             name,
-            created: None,
-            modified: None,
-            accessed: None,
+            created,
+            modified,
+            accessed,
             permissions: None,
             owner: None,
             group: None,
@@ -214,11 +249,11 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
                     Attribute::Resident { header, value, .. }
                         if header.attr_type == AttributeType::StandardInformation =>
                     {
-                        StandardInformation::from_bytes(value)
+                        StandardInformation::from_bytes(value).map(|si| si.mft_modified)
                     }
                     _ => None,
                 })
-                .map(|si| si.mft_modified)
+                .map(|ft| filetime_to_local_datetime(ft))
                 .unwrap_or_else(|| "-".to_string());
 
             let ftype = if rec.is_dir() { "DIR" } else { "FILE" };
