@@ -1,16 +1,19 @@
 use clap::{Arg, ArgAction, Command, value_parser};
 use clap_num::maybe_hex;
 use exhume_body::Body;
+use exhume_filesystem::File;
 use exhume_filesystem::Filesystem;
 use exhume_filesystem::detected_fs::detect_filesystem;
 use exhume_filesystem::filesystem::DirectoryCommon;
 use exhume_filesystem::filesystem::FileCommon;
 use log::{debug, error, info};
 use serde_json::{Value, json};
+use std::collections::{HashSet, VecDeque};
+use std::error::Error;
 
 fn main() {
     let matches = Command::new("exhume_filesystem")
-        .version("0.2.5")
+        .version("0.3.0")
         .author("ForensicXlab")
         .about("Exhume in a standardized and normalized way files & directories from a given filesystem.")
         .arg(
@@ -61,7 +64,6 @@ fn main() {
                 .conflicts_with("dump")
                 .conflicts_with("list")
                 .conflicts_with("record")
-                .conflicts_with("json")
                 .action(ArgAction::SetTrue)
                 .help("Enumerate all file records"),
         )
@@ -224,12 +226,57 @@ fn main() {
     }
 
     if enumerate {
-        match filesystem.enumerate() {
-            Ok(_) => {}
-            Err(err) => {
+        if json_output {
+            match enumerate_collect(&mut filesystem) {
+                Ok(files) => {
+                    println!("{}", serde_json::to_string_pretty(&files).unwrap());
+                }
+                Err(err) => {
+                    error!("Failed JSON enumeration: {:?}", err);
+                }
+            }
+        } else {
+            if let Err(err) = filesystem.enumerate() {
                 error!("Could not enumerate the files: {:?}", err);
-                return;
             }
         }
     }
+}
+
+fn enumerate_collect<F: Filesystem>(fs: &mut F) -> Result<Vec<File>, Box<dyn Error>> {
+    let mut out: Vec<File> = Vec::new();
+    let mut visited = HashSet::<u64>::new();
+    let mut queue = VecDeque::<(u64, String)>::new();
+
+    let sep = fs.path_separator();
+    let root_id = fs.get_root_file_id();
+    let root_path = sep.clone();
+
+    queue.push_back((root_id, root_path.clone()));
+
+    while let Some((id, path)) = queue.pop_front() {
+        if !visited.insert(id) {
+            continue;
+        }
+
+        let file_rec = fs.get_file(id)?;
+        let file_obj = fs.record_to_file(&file_rec, id, &path);
+        out.push(file_obj.clone());
+
+        if file_rec.is_dir() {
+            let entries = fs.list_dir(&file_rec)?;
+            for de in entries {
+                let child_id = de.file_id();
+                let name = de.name();
+                let child_path = if path == sep {
+                    format!("{}{}", sep, name)
+                } else {
+                    format!("{}{}{}", path, sep, name)
+                };
+                queue.push_back((child_id, child_path));
+            }
+        }
+    }
+
+    Ok(out)
 }
