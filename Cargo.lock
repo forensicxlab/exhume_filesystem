@@ -546,9 +546,9 @@ dependencies = [
 
 [[package]]
 name = "exhume_exfat"
-version = "0.1.1"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bcbca7d3b700813ec1cf3a55b45ca66343a2c720e910717eb5cd4bc5f794acc"
+checksum = "b61c7525f1361f823b1b59dd1f046f6f0c9a9ebd5b2e9b92f606a01319422aee"
 dependencies = [
  "chrono",
  "clap",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "exhume_filesystem"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "clap",
  "clap-num",

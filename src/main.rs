@@ -13,7 +13,7 @@ use std::error::Error;
 
 fn main() {
     let matches = Command::new("exhume_filesystem")
-        .version("0.3.0")
+        .version("0.3.2")
         .author("ForensicXlab")
         .about("Exhume in a standardized and normalized way files & directories from a given filesystem.")
         .arg(
