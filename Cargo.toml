@@ -14,10 +14,10 @@ exhume_body = "=0.3.4"
 
 exhume_extfs = "=0.1.9"
 exhume_ntfs = "=0.1.6"
-exhume_exfat = "=0.1.3"
+#exhume_exfat = "=0.1.3"
 # exhume_extfs = { path = "../exhume_extfs" }
 # exhume_ntfs = { path = "../exhume_ntfs" }
-#exhume_exfat = { path = "../exhume_exfat" }
+exhume_exfat = { path = "../exhume_exfat" }
 
 
 # We will propose LVM on top of the filesystem later

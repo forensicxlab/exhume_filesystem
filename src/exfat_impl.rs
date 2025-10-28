@@ -44,6 +44,9 @@ fn make_root_inode(bpb: &BootSector) -> ExInode {
         first_cluster: bpb.root_dir_first_cluster,
         size: 0,
         name: "/".to_string(),
+        create_time: 0,
+        last_access_time: 0,
+        last_mod_time: 0,
     }
 }
 
@@ -173,9 +176,9 @@ impl<T: Read + Seek> Filesystem for ExFatFS<T> {
                 Some(n) => n.to_string_lossy().to_string(),
                 None => absolute_path.to_string(),
             },
-            created: None,
-            modified: None,
-            accessed: None,
+            created: Some(inode.create_time as u64),
+            modified: Some(inode.last_mod_time as u64),
+            accessed: Some(inode.last_access_time as u64),
             permissions: Some(exfat_attr_string(inode.attributes, is_dir)),
             owner: None,
             group: None,
