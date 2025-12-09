@@ -1,4 +1,4 @@
-use clap::{Arg, ArgAction, Command, value_parser};
+use clap::*;
 use clap_num::maybe_hex;
 use exhume_body::Body;
 use exhume_filesystem::File;
@@ -13,8 +13,8 @@ use std::error::Error;
 
 fn main() {
     let matches = Command::new("exhume_filesystem")
-        .version("0.3.2")
-        .author("ForensicXlab")
+        .version(crate_version!())
+        .author(crate_authors!())
         .about("Exhume in a standardized and normalized way files & directories from a given filesystem.")
         .arg(
             Arg::new("body")
