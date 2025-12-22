@@ -4,7 +4,9 @@ use serde_json::Value;
 use sqlx::FromRow;
 use std::error::Error;
 use std::fs::File as StdFile;
-use std::io::Write;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+
+const CACHE_SIZE: usize = 64 * 1024; // 64 KiB cache;
 
 /// A trait for common file record functionality.
 pub trait FileCommon {
@@ -125,5 +127,135 @@ pub trait Filesystem {
                 error!("Cannot read content for inode {}: {}", file.id(), e);
             }
         }
+    }
+}
+
+/// Single-thread Read+Seek adapter backed by Filesystem::read_file_slice().
+pub struct FsFileReadSeek<'a, F>
+where
+    F: Filesystem,
+    F::FileType: FileCommon,
+{
+    fs: &'a mut F,
+    file: F::FileType,
+    len: u64,
+    pos: u64,
+
+    // Simple read-ahead cache
+    cache: Vec<u8>,
+    cache_start: u64,
+}
+
+impl<'a, F> FsFileReadSeek<'a, F>
+where
+    F: Filesystem,
+    F::FileType: FileCommon,
+{
+    /// Create an adapter from an already fetched filesystem file record.
+    pub fn new(fs: &'a mut F, file: F::FileType) -> Self {
+        let len = file.size();
+        Self {
+            fs,
+            file,
+            len,
+            pos: 0,
+            cache: Vec::new(),
+            cache_start: 0,
+        }
+    }
+
+    /// Fetch file by id (filesystem identifier) and create adapter.
+    pub fn from_id(fs: &'a mut F, file_id: u64) -> Result<Self, Box<dyn Error>> {
+        let file = fs.get_file(file_id)?;
+        Ok(Self::new(fs, file))
+    }
+
+    #[inline]
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    #[inline]
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    fn refill_cache(&mut self, at: u64) -> io::Result<()> {
+        if at >= self.len {
+            self.cache.clear();
+            self.cache_start = at;
+            return Ok(());
+        }
+
+        let want = (self.len - at).min(CACHE_SIZE as u64) as usize;
+        let data = self.fs.read_file_slice(&self.file, at, want).unwrap();
+        self.cache_start = at;
+        self.cache = data;
+        Ok(())
+    }
+}
+
+impl<'a, F> Read for FsFileReadSeek<'a, F>
+where
+    F: Filesystem,
+    F::FileType: FileCommon,
+{
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.pos >= self.len {
+            return Ok(0);
+        }
+
+        let cache_end = self.cache_start.saturating_add(self.cache.len() as u64);
+        if self.cache.is_empty() || !(self.cache_start <= self.pos && self.pos < cache_end) {
+            self.refill_cache(self.pos)?;
+        }
+
+        if self.cache.is_empty() {
+            return Ok(0);
+        }
+
+        let cache_off = (self.pos - self.cache_start) as usize;
+        let available = self.cache.len().saturating_sub(cache_off);
+        if available == 0 {
+            return Ok(0);
+        }
+
+        let to_copy = available.min(buf.len());
+        buf[..to_copy].copy_from_slice(&self.cache[cache_off..cache_off + to_copy]);
+
+        self.pos += to_copy as u64;
+        Ok(to_copy)
+    }
+}
+
+impl<'a, F> Seek for FsFileReadSeek<'a, F>
+where
+    F: Filesystem,
+    F::FileType: FileCommon,
+{
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let new_pos_i128: i128 = match pos {
+            SeekFrom::Start(off) => off as i128,
+            SeekFrom::Current(delta) => self.pos as i128 + delta as i128,
+            SeekFrom::End(delta) => self.len as i128 + delta as i128,
+        };
+
+        if new_pos_i128 < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before start",
+            ));
+        }
+
+        let new_pos = new_pos_i128 as u64;
+        if new_pos > self.len {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek past end"));
+        }
+
+        self.pos = new_pos;
+        Ok(self.pos)
     }
 }
