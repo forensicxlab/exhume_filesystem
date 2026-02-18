@@ -3,7 +3,7 @@ use clap_num::maybe_hex;
 use exhume_body::Body;
 use exhume_filesystem::File;
 use exhume_filesystem::Filesystem;
-use exhume_filesystem::detected_fs::detect_filesystem;
+use exhume_filesystem::detected_fs::{DetectedFs, detect_filesystem};
 use exhume_filesystem::filesystem::DirectoryCommon;
 use exhume_filesystem::filesystem::FileCommon;
 use log::{debug, error, info};
@@ -227,7 +227,11 @@ fn main() {
 
     if enumerate {
         if json_output {
-            match enumerate_collect(&mut filesystem) {
+            let collected = match &mut filesystem {
+                DetectedFs::Apfs(fs) => fs.enumerate_all_files(),
+                _ => enumerate_collect(&mut filesystem),
+            };
+            match collected {
                 Ok(files) => {
                     println!("{}", serde_json::to_string_pretty(&files).unwrap());
                 }
@@ -259,12 +263,18 @@ fn enumerate_collect<F: Filesystem>(fs: &mut F) -> Result<Vec<File>, Box<dyn Err
             continue;
         }
 
-        let file_rec = fs.get_file(id)?;
+        let file_rec = match fs.get_file(id) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let file_obj = fs.record_to_file(&file_rec, id, &path);
         out.push(file_obj.clone());
 
         if file_rec.is_dir() {
-            let entries = fs.list_dir(&file_rec)?;
+            let entries = match fs.list_dir(&file_rec) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
             for de in entries {
                 let child_id = de.file_id();
                 let name = de.name();
