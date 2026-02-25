@@ -65,6 +65,9 @@ pub trait Filesystem {
     fn get_metadata(&self) -> Result<Value, Box<dyn Error>>;
     fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
+    fn get_file_by_path(&mut self, _path: &str, _file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+        Err("get_file_by_path not implemented for this filesystem".into())
+    }
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
     fn read_file_prefix(
         &mut self,

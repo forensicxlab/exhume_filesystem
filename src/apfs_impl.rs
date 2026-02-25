@@ -119,6 +119,11 @@ impl<T: Read + Seek> ApfsFs<T> {
         let vols = self.valid_volumes.clone();
 
         for (vol, root_inode_id) in vols {
+            let fst = self.get_fstree(vol.fs_index)?;
+            
+            // Linear B-Tree scan to load all records into memory at once
+            let (inodes, drecs) = fst.scan_all_records(&mut self.apfs)?;
+
             let mut visited = HashSet::<u64>::new();
             let mut queue = VecDeque::<(u64, String)>::new();
             let vol_prefix = format!("/volume_{}", vol.fs_index);
@@ -128,11 +133,12 @@ impl<T: Read + Seek> ApfsFs<T> {
                 if !visited.insert(inode_id) {
                     continue;
                 }
-                let fst = self.get_fstree(vol.fs_index)?;
-                let inode = match fst.inode_by_id(&mut self.apfs, inode_id)? {
-                    Some(v) => v,
+                
+                let inode = match inodes.get(&inode_id) {
+                    Some(v) => v.clone(),
                     None => continue,
                 };
+                
                 let rec = ApfsFileRecord {
                     fs_index: vol.fs_index,
                     inode_id,
@@ -142,20 +148,18 @@ impl<T: Read + Seek> ApfsFs<T> {
                 callback(self.record_to_file(&rec, packed_id, &path));
 
                 if rec.is_dir() {
-                    let children = match fst.dir_children(&mut self.apfs, inode_id) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    for de in children {
-                        let Some(child_inode) = de.inode_id else {
-                            continue;
-                        };
-                        let child_path = if path == vol_prefix {
-                            format!("{}/{}", vol_prefix, de.name)
-                        } else {
-                            format!("{}/{}", path, de.name)
-                        };
-                        queue.push_back((child_inode, child_path));
+                    if let Some(children) = drecs.get(&inode_id) {
+                        for de in children {
+                            let Some(child_inode) = de.inode_id else {
+                                continue;
+                            };
+                            let child_path = if path == vol_prefix {
+                                format!("{}/{}", vol_prefix, de.name)
+                            } else {
+                                format!("{}/{}", path, de.name)
+                            };
+                            queue.push_back((child_inode, child_path));
+                        }
                     }
                 }
             }

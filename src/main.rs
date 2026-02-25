@@ -1,15 +1,17 @@
 use clap::*;
 use clap_num::maybe_hex;
-use exhume_body::Body;
+use exhume_body::{Body, BodySlice};
 use exhume_filesystem::File;
 use exhume_filesystem::Filesystem;
 use exhume_filesystem::detected_fs::{DetectedFs, detect_filesystem};
+use exhume_filesystem::folder_impl::FolderFS;
 use exhume_filesystem::filesystem::DirectoryCommon;
 use exhume_filesystem::filesystem::FileCommon;
 use log::{debug, error, info};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
+use std::path::Path;
 
 fn main() {
     let matches = Command::new("exhume_filesystem")
@@ -37,7 +39,7 @@ fn main() {
                 .short('o')
                 .long("offset")
                 .value_parser(maybe_hex::<u64>)
-                .required(true)
+                .required(false) // Not required for folders
                 .help("The filesystem starts address (decimal or hex)."),
         )
         .arg(
@@ -45,7 +47,7 @@ fn main() {
                 .short('s')
                 .long("size")
                 .value_parser(maybe_hex::<u64>)
-                .required(true)
+                .required(false) // Not required for folders
                 .help("The size of the filesystem in sectors (decimal or hex)."),
         )
 
@@ -128,8 +130,24 @@ fn main() {
     let file_path = matches.get_one::<String>("body").unwrap();
     let auto = String::from("auto");
     let format = matches.get_one::<String>("format").unwrap_or(&auto);
-    let offset = matches.get_one::<u64>("offset").unwrap();
-    let size = matches.get_one::<u64>("size").unwrap();
+    
+    // Check if path is a directory
+    let path = Path::new(file_path);
+    let is_directory = path.is_dir();
+
+    let offset = matches.get_one::<u64>("offset");
+    let size = matches.get_one::<u64>("size");
+    
+    // Validation for non-directory inputs
+    if !is_directory {
+        if offset.is_none() || size.is_none() {
+            // Need a way to enforce required args conditionally? 
+            // Clap doesn't support conditional requirements easily.
+            // We just error out here.
+            error!("Offset and Size arguments are required for disk images.");
+            return;
+        }
+    }
 
     let file_id = matches.get_one::<usize>("record").copied().unwrap_or(0);
     let list = matches.get_flag("list");
@@ -139,16 +157,24 @@ fn main() {
     let dump = matches.get_flag("dump");
     let json_output = matches.get_flag("json");
 
-    let body = Body::new(file_path.to_owned(), format);
-    debug!("Created Body from '{}'", file_path);
+    let mut filesystem: DetectedFs<BodySlice> = if is_directory {
+        let fs = FolderFS::new(path.to_path_buf());
+        DetectedFs::Folder(fs)
+    } else {
+        let offset_val = *offset.unwrap();
+        let size_val = *size.unwrap();
+        
+        let body = Body::new(file_path.to_owned(), format);
+        debug!("Created Body from '{}'", file_path);
 
-    let partition_size = *size * body.get_sector_size() as u64;
+        let partition_size = size_val * body.get_sector_size() as u64;
 
-    let mut filesystem = match detect_filesystem(&body, *offset, partition_size) {
-        Ok(fs) => fs,
-        Err(e) => {
-            error!("Could not detect the provided filesystem: {e:?}");
-            return;
+        match detect_filesystem(&body, offset_val, partition_size) {
+            Ok(fs) => fs,
+            Err(e) => {
+                error!("Could not detect the provided filesystem: {e:?}");
+                return;
+            }
         }
     };
 

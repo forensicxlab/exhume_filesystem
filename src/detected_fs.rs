@@ -1,5 +1,6 @@
 use crate::apfs_impl::ApfsFs;
 use crate::filesystem::{DirectoryCommon, File, FileCommon, Filesystem};
+use crate::folder_impl::FolderFS;
 use exhume_apfs::APFS;
 use exhume_body::{Body, BodySlice};
 use exhume_exfat::ExFatFS;
@@ -15,6 +16,7 @@ pub enum DetectedFs<T: Read + Seek> {
     Ntfs(NTFS<T>),
     Exfat(ExFatFS<T>),
     Apfs(ApfsFs<T>),
+    Folder(FolderFS),
 }
 
 pub enum DetectedFile {
@@ -22,6 +24,7 @@ pub enum DetectedFile {
     Ntfs(exhume_ntfs::mft::MFTRecord),
     Exfat(exhume_exfat::exinode::ExInode),
     Apfs(crate::apfs_impl::ApfsFileRecord),
+    Folder(crate::folder_impl::FolderFile),
 }
 
 pub enum DetectedDir {
@@ -29,6 +32,7 @@ pub enum DetectedDir {
     Ntfs(exhume_ntfs::mft::DirectoryEntry),
     Exfat(exhume_exfat::compat::CompatDirEntry),
     Apfs(crate::apfs_impl::ApfsDirectoryEntry),
+    Folder(crate::folder_impl::FolderDirectory),
 }
 
 impl FileCommon for DetectedFile {
@@ -38,6 +42,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.id(),
             DetectedFile::Exfat(inode) => inode.id(),
             DetectedFile::Apfs(inode) => inode.id(),
+            DetectedFile::Folder(file) => file.id(),
         }
     }
     fn size(&self) -> u64 {
@@ -46,6 +51,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.size(),
             DetectedFile::Exfat(inode) => inode.size(),
             DetectedFile::Apfs(inode) => inode.size(),
+            DetectedFile::Folder(file) => file.size(),
         }
     }
     fn is_dir(&self) -> bool {
@@ -54,6 +60,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.is_dir(),
             DetectedFile::Exfat(inode) => inode.is_dir(),
             DetectedFile::Apfs(inode) => inode.is_dir(),
+            DetectedFile::Folder(file) => file.is_dir(),
         }
     }
     fn to_string(&self) -> String {
@@ -62,6 +69,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.to_string(),
             DetectedFile::Exfat(inode) => inode.to_string(),
             DetectedFile::Apfs(inode) => inode.to_string(),
+            DetectedFile::Folder(file) => file.to_string(),
         }
     }
     fn to_json(&self) -> Value {
@@ -70,6 +78,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.to_json(),
             DetectedFile::Exfat(inode) => inode.to_json(),
             DetectedFile::Apfs(inode) => inode.to_json(),
+            DetectedFile::Folder(file) => file.to_json(),
         }
     }
 }
@@ -81,6 +90,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.file_id(),
             DetectedDir::Exfat(d) => d.file_id(),
             DetectedDir::Apfs(d) => d.file_id(),
+            DetectedDir::Folder(d) => d.file_id(),
         }
     }
     fn name(&self) -> &str {
@@ -89,6 +99,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.name(),
             DetectedDir::Exfat(d) => d.name(),
             DetectedDir::Apfs(d) => d.name(),
+            DetectedDir::Folder(d) => d.name(),
         }
     }
     fn to_string(&self) -> String {
@@ -97,6 +108,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.to_string(),
             DetectedDir::Exfat(d) => d.to_string(),
             DetectedDir::Apfs(d) => d.to_string(),
+            DetectedDir::Folder(d) => d.to_string(),
         }
     }
     fn to_json(&self) -> Value {
@@ -105,6 +117,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.to_json(),
             DetectedDir::Exfat(d) => d.to_json(),
             DetectedDir::Apfs(d) => d.to_json(),
+            DetectedDir::Folder(d) => d.to_json(),
         }
     }
 }
@@ -119,6 +132,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.filesystem_type(),
             DetectedFs::Exfat(fs) => fs.filesystem_type(),
             DetectedFs::Apfs(fs) => fs.filesystem_type(),
+            DetectedFs::Folder(fs) => fs.filesystem_type(),
         }
     }
     fn path_separator(&self) -> String {
@@ -127,6 +141,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.path_separator(),
             DetectedFs::Exfat(fs) => fs.path_separator(),
             DetectedFs::Apfs(fs) => fs.path_separator(),
+            DetectedFs::Folder(fs) => fs.path_separator(),
         }
     }
     fn record_count(&mut self) -> u64 {
@@ -135,6 +150,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.record_count(),
             DetectedFs::Exfat(fs) => fs.record_count(),
             DetectedFs::Apfs(fs) => fs.record_count(),
+            DetectedFs::Folder(fs) => fs.record_count(),
         }
     }
     fn block_size(&self) -> u64 {
@@ -143,6 +159,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.block_size(),
             DetectedFs::Exfat(fs) => fs.block_size(),
             DetectedFs::Apfs(fs) => fs.block_size(),
+            DetectedFs::Folder(fs) => fs.block_size(),
         }
     }
     fn get_metadata(&self) -> Result<Value, Box<dyn Error>> {
@@ -151,6 +168,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_metadata(),
             DetectedFs::Exfat(fs) => fs.get_metadata(),
             DetectedFs::Apfs(fs) => fs.get_metadata(),
+            DetectedFs::Folder(fs) => fs.get_metadata(),
         }
     }
     fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>> {
@@ -159,6 +177,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_metadata_pretty(),
             DetectedFs::Exfat(fs) => fs.get_metadata_pretty(),
             DetectedFs::Apfs(fs) => fs.get_metadata_pretty(),
+            DetectedFs::Folder(fs) => fs.get_metadata_pretty(),
         }
     }
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
@@ -167,6 +186,16 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_file(file_id).map(DetectedFile::Ntfs),
             DetectedFs::Exfat(fs) => fs.get_file(file_id).map(DetectedFile::Exfat),
             DetectedFs::Apfs(fs) => fs.get_file(file_id).map(DetectedFile::Apfs),
+            DetectedFs::Folder(fs) => fs.get_file(file_id).map(DetectedFile::Folder),
+        }
+    }
+    fn get_file_by_path(&mut self, path: &str, file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+        match self {
+            DetectedFs::Ext(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Ext),
+            DetectedFs::Ntfs(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Ntfs),
+            DetectedFs::Exfat(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Exfat),
+            DetectedFs::Apfs(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Apfs),
+            DetectedFs::Folder(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Folder),
         }
     }
     fn read_file_content(&mut self, record: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -175,6 +204,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(rec)) => fs.read_file_content(rec),
             (DetectedFs::Exfat(fs), DetectedFile::Exfat(inode)) => fs.read_file_content(inode),
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => fs.read_file_content(inode),
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.read_file_content(file),
             _ => Err("filesystem / record variant mismatch".into()),
         }
     }
@@ -189,7 +219,9 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             (DetectedFs::Exfat(fs), DetectedFile::Exfat(inode)) => {
                 fs.read_file_prefix(inode, length)
             }
+
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => fs.read_file_prefix(inode, length),
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.read_file_prefix(file, length),
             _ => Err("filesystem / record variant mismatch".into()),
         }
     }
@@ -212,6 +244,9 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => {
                 fs.read_file_slice(inode, offset, length)
             }
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
+                fs.read_file_slice(file, offset, length)
+            }
             _ => Err("filesystem / record variant mismatch".into()),
         }
     }
@@ -230,6 +265,8 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
                 .map(|v| v.into_iter().map(DetectedDir::Exfat).collect()),
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => Filesystem::list_dir(fs, inode)
                 .map(|v| v.into_iter().map(DetectedDir::Apfs).collect()),
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => Filesystem::list_dir(fs, file)
+                .map(|v| v.into_iter().map(DetectedDir::Folder).collect()),
             _ => Err("filesystem / record variant mismatch".into()),
         }
     }
@@ -239,6 +276,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.enumerate(),
             DetectedFs::Exfat(fs) => fs.enumerate(),
             DetectedFs::Apfs(fs) => fs.enumerate(),
+            DetectedFs::Folder(fs) => fs.enumerate(),
         }
     }
     fn get_root_file_id(&self) -> u64 {
@@ -247,6 +285,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_root_file_id(),
             DetectedFs::Exfat(fs) => fs.get_root_file_id(),
             DetectedFs::Apfs(fs) => fs.get_root_file_id(),
+            DetectedFs::Folder(fs) => fs.get_root_file_id(),
         }
     }
     fn record_to_file(&self, record: &Self::FileType, inode_num: u64, absolute_path: &str) -> File {
@@ -262,6 +301,9 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             }
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => {
                 fs.record_to_file(inode, inode_num, absolute_path)
+            }
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
+                fs.record_to_file(file, inode_num, absolute_path)
             }
             _ => unreachable!("filesystem / record variant mismatch"),
         }

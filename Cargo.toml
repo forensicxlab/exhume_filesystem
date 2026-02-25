@@ -1,6 +1,6 @@
 [package]
 name = "exhume_filesystem"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "This exhume module is proposing a standard abstraction layer of a FileSystem, File and Directory for any exhume filesystem modules (extfs, ...)."
 documentation = "https://www.forensicxlab.com/docs/category/exhume---filesystem"
@@ -10,11 +10,13 @@ license = "GPL-2.0-or-later"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-exhume_body = "=0.5.0"
-exhume_extfs = "=0.1.11"
-exhume_ntfs = "=0.1.11"
-exhume_exfat = "=0.1.5"
-exhume_apfs = "=0.1.0"
+exhume_body = "=0.5.1"
+exhume_extfs = "=0.1.12"
+exhume_ntfs = "=0.1.12"
+exhume_exfat = "=0.1.6"
+exhume_apfs = "=0.1.1"
+
+# exhume_apfs = { path = "../exhume_apfs" }
 # exhume_extfs = { path = "../exhume_extfs" }
 # exhume_ntfs = { path = "../exhume_ntfs" }
 # exhume_exfat = { path = "../exhume_exfat" }
