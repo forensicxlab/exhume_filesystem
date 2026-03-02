@@ -4,7 +4,6 @@ use exhume_extfs::ExtFS;
 use exhume_extfs::direntry::DirEntry;
 use exhume_extfs::inode::Inode;
 use serde_json::Value;
-use std::collections::{HashSet, VecDeque};
 
 use std::error::Error;
 use std::io::{Read, Seek};
@@ -23,7 +22,7 @@ impl FileCommon for Inode {
     }
 
     fn to_string(&self) -> String {
-        self.to_string()
+        ToString::to_string(self)
     }
 
     fn to_json(&self) -> Value {
@@ -62,7 +61,7 @@ impl DirectoryCommon for DirEntry {
     }
     /// Return the string representation of a File
     fn to_string(&self) -> String {
-        self.to_string()
+        ToString::to_string(self)
     }
     /// Return the json representation of a File
     fn to_json(&self) -> Value {
@@ -115,7 +114,7 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
     }
 
     fn get_root_file_id(&self) -> u64 {
-        return 2;
+        2
     }
 
     fn read_file_slice(
@@ -161,54 +160,18 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
             group: Some(format!("{}", inode.gid())),
             ftype: file_type.clone(),
             size: inode.size(),
-            metadata: inode.to_json(),
-        }
-    }
-
-    /// Builds a list of all files (and directories) in the filesystem
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut result: Vec<File> = Vec::new();
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        let root_file_record = 2;
-        queue.push_back((root_file_record, "/".to_owned()));
-
-        while let Some((inode_num, path)) = queue.pop_front() {
-            if !visited.insert(inode_num) {
-                continue;
-            }
-
-            let inode = self.get_file(inode_num).expect("Could not get Inode.");
-            let file_obj = self.record_to_file(&inode, inode_num, &path);
-
-            println!(
+            display: Some(format!(
                 "[{}] - {} {} {} {} {:>5} {} {}",
-                inode.id(),
-                format_unix_permissions(&inode),
+                inode_num,
+                format_unix_permissions(inode),
                 inode.i_links_count,
                 inode.uid(),
                 inode.gid(),
                 inode.size(),
                 inode.i_mtime_h,
-                file_obj.absolute_path
-            );
-
-            result.push(file_obj.clone());
-
-            if inode.is_dir() {
-                let entries = self.list_dir(&inode)?;
-                for entry in entries {
-                    let child_inode_num = entry.file_id() as u64;
-                    let name = entry.name();
-                    let child_path = if path == "/" {
-                        format!("/{}", name)
-                    } else {
-                        format!("{}/{}", path, name)
-                    };
-                    queue.push_back((child_inode_num, child_path));
-                }
-            }
+                absolute_path
+            )),
+            metadata: inode.to_json(),
         }
-        Ok(())
     }
 }

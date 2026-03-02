@@ -1,5 +1,5 @@
 use crate::filesystem::{DirectoryCommon, File, FileCommon, Filesystem};
-use exhume_apfs::{APFS, ApfsVolumeSuperblock, DirEntry, InodeVal, FsTree, is_dir_mode, apfs_kind, fmt_apfs_ns_utc};
+use exhume_apfs::{APFS, ApfsVolumeSuperblock, DirEntry, FsTree, InodeVal, apfs_kind, is_dir_mode};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
@@ -92,80 +92,19 @@ impl<T: Read + Seek> ApfsFs<T> {
         if let Some(tree) = self.cached_trees.get(&fs_index) {
             return Ok(tree.clone());
         }
-        let vol = self.volume_by_index(fs_index).ok_or_else(|| format!("Volume with fs_index {} not found", fs_index))?;
+        let vol = self
+            .volume_by_index(fs_index)
+            .ok_or_else(|| format!("Volume with fs_index {} not found", fs_index))?;
         let tree = self.apfs.open_fstree_for_volume(&vol)?;
         self.cached_trees.insert(fs_index, tree.clone());
         Ok(tree)
     }
-
 
     fn volume_by_index(&self, fs_index: u32) -> Option<ApfsVolumeSuperblock> {
         self.valid_volumes
             .iter()
             .find(|(v, _)| v.fs_index == fs_index)
             .map(|(v, _)| v.clone())
-    }
-
-    pub fn enumerate_all_files(&mut self) -> Result<Vec<File>, Box<dyn Error>> {
-        let mut out = Vec::<File>::new();
-        self.walk_fs(|f| out.push(f))?;
-        Ok(out)
-    }
-
-    fn walk_fs<F>(&mut self, mut callback: F) -> Result<(), Box<dyn Error>>
-    where
-        F: FnMut(File),
-    {
-        let vols = self.valid_volumes.clone();
-
-        for (vol, root_inode_id) in vols {
-            let fst = self.get_fstree(vol.fs_index)?;
-            
-            // Linear B-Tree scan to load all records into memory at once
-            let (inodes, drecs) = fst.scan_all_records(&mut self.apfs)?;
-
-            let mut visited = HashSet::<u64>::new();
-            let mut queue = VecDeque::<(u64, String)>::new();
-            let vol_prefix = format!("/volume_{}", vol.fs_index);
-            queue.push_back((root_inode_id, vol_prefix.clone()));
-
-            while let Some((inode_id, path)) = queue.pop_front() {
-                if !visited.insert(inode_id) {
-                    continue;
-                }
-                
-                let inode = match inodes.get(&inode_id) {
-                    Some(v) => v.clone(),
-                    None => continue,
-                };
-                
-                let rec = ApfsFileRecord {
-                    fs_index: vol.fs_index,
-                    inode_id,
-                    inode,
-                };
-                let packed_id = pack_identifier(vol.fs_index, inode_id);
-                callback(self.record_to_file(&rec, packed_id, &path));
-
-                if rec.is_dir() {
-                    if let Some(children) = drecs.get(&inode_id) {
-                        for de in children {
-                            let Some(child_inode) = de.inode_id else {
-                                continue;
-                            };
-                            let child_path = if path == vol_prefix {
-                                format!("{}/{}", vol_prefix, de.name)
-                            } else {
-                                format!("{}/{}", path, de.name)
-                            };
-                            queue.push_back((child_inode, child_path));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -210,6 +149,10 @@ impl ApfsFileRecord {
         fst: &exhume_apfs::FsTree,
     ) -> u64 {
         let declared = self.size();
+        if declared > 0 {
+            return declared;
+        }
+
         let mut ext = fst.file_extents(apfs, self.inode_id).unwrap_or_default();
         if ext.is_empty() && self.inode.private_id != 0 {
             ext = fst
@@ -220,11 +163,7 @@ impl ApfsFileRecord {
         for e in &ext {
             max_end = max_end.max(e.logical_addr.saturating_add(e.length_bytes));
         }
-        if max_end > declared {
-            max_end
-        } else {
-            declared
-        }
+        max_end
     }
 }
 
@@ -421,6 +360,16 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
             permissions: Some(apfs_mode_to_string(file.inode.mode)),
             owner: Some(format!("{}", file.inode.owner)),
             group: Some(format!("{}", file.inode.group)),
+            display: Some(format!(
+                "[{}] - {} {} {} {} {} {}",
+                file_id,
+                apfs_mode_to_string(file.inode.mode),
+                exhume_apfs::fmt_apfs_ns_utc(file.inode.mod_time),
+                file.inode.owner,
+                file.inode.group,
+                file.size(),
+                absolute_path
+            )),
             metadata: file.to_json(),
         }
     }
@@ -429,21 +378,79 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         self.root_inode_id
     }
 
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
-        self.walk_fs(|file| {
-            println!(
-                "[{}] - {} {} {} {} {} {}",
-                file.identifier,
-                file.permissions
-                    .clone()
-                    .unwrap_or_else(|| "??????????".to_string()),
-                fmt_apfs_ns_utc((file.modified.unwrap_or(0) as u64) * 1_000_000_000),
-                file.owner.clone().unwrap_or_else(|| "-".to_string()),
-                file.group.clone().unwrap_or_else(|| "-".to_string()),
-                file.size,
-                file.absolute_path
-            );
-        })
+    fn walk_fs(
+        &mut self,
+        callback: &mut dyn FnMut(crate::filesystem::WalkEvent),
+    ) -> Result<(), Box<dyn Error>> {
+        let vols = self.valid_volumes.clone();
+
+        for (vol, root_inode_id) in vols {
+            let fst = self.get_fstree(vol.fs_index)?;
+
+            callback(crate::filesystem::WalkEvent::Status(format!(
+                "Scanning APFS volume {} B-Tree...",
+                vol.fs_index
+            )));
+
+            // Linear B-Tree scan to load all records into memory at once
+            let (inodes, drecs) = fst.scan_all_records(
+                &mut self.apfs,
+                Some(&mut |count| {
+                    callback(crate::filesystem::WalkEvent::Status(format!(
+                        "Scanning APFS B-Tree... {} records processed",
+                        count
+                    )));
+                }),
+            )?;
+
+            callback(crate::filesystem::WalkEvent::Status(format!(
+                "Building tree for volume {}...",
+                vol.fs_index
+            )));
+            let mut visited = HashSet::<u64>::new();
+            let mut queue = VecDeque::<(u64, String)>::new();
+            let vol_prefix = format!("/volume_{}", vol.fs_index);
+            queue.push_back((root_inode_id, vol_prefix.clone()));
+
+            while let Some((inode_id, path)) = queue.pop_front() {
+                if !visited.insert(inode_id) {
+                    continue;
+                }
+
+                let inode = match inodes.get(&inode_id) {
+                    Some(v) => v.clone(),
+                    None => continue,
+                };
+
+                let rec = ApfsFileRecord {
+                    fs_index: vol.fs_index,
+                    inode_id,
+                    inode,
+                };
+                let packed_id = pack_identifier(vol.fs_index, inode_id);
+                callback(crate::filesystem::WalkEvent::File(
+                    self.record_to_file(&rec, packed_id, &path),
+                ));
+
+                if rec.is_dir()
+                    && let Some(children) = drecs.get(&inode_id)
+                {
+                    for de in children {
+                            let Some(child_inode) = de.inode_id else {
+                                continue;
+                            };
+                            let child_path = if path == vol_prefix {
+                                format!("{}/{}", vol_prefix, de.name)
+                            } else {
+                                format!("{}/{}", path, de.name)
+                            };
+                            queue.push_back((child_inode, child_path));
+                        }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -495,15 +502,27 @@ impl<T: Read + Seek> ApfsFs<T> {
 
             let read_len =
                 usize::try_from(ov_end - ov_start).map_err(|_| "extent overlap too large")?;
-            let rel_in_ext = ov_start - ext_start;
-            let phys_byte = e
-                .phys_block_num
-                .checked_mul(bs)
-                .and_then(|x| x.checked_add(rel_in_ext))
-                .ok_or("physical offset overflow")?;
             let mut buf = vec![0u8; read_len];
-            self.apfs.body.seek(SeekFrom::Start(phys_byte))?;
-            self.apfs.body.read_exact(&mut buf)?;
+
+            if e.phys_block_num != 0 {
+                let rel_in_ext = ov_start - ext_start;
+                let phys_byte = e
+                    .phys_block_num
+                    .checked_mul(bs)
+                    .and_then(|x| x.checked_add(rel_in_ext))
+                    .ok_or("physical offset overflow")?;
+                println!(
+                    "DEBUG: extent id={}, log_start={}, log_len={}, log_end={}, phys_block={}, phys_byte={}",
+                    file.inode_id,
+                    e.logical_addr,
+                    e.length_bytes,
+                    ext_end,
+                    e.phys_block_num,
+                    phys_byte
+                );
+                self.apfs.body.seek(SeekFrom::Start(phys_byte))?;
+                self.apfs.body.read_exact(&mut buf)?;
+            }
 
             let dst_off =
                 usize::try_from(ov_start - offset).map_err(|_| "destination offset too large")?;
@@ -513,7 +532,6 @@ impl<T: Read + Seek> ApfsFs<T> {
         Ok(out)
     }
 }
-
 
 fn apfs_mode_to_string(mode: u16) -> String {
     let mut out = String::with_capacity(10);

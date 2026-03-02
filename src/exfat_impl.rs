@@ -4,7 +4,6 @@ use exhume_exfat::exinode::ExInode;
 use exhume_exfat::{BootSector, ExFatFS};
 use serde_json::Value;
 
-use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::io::{Read, Seek};
 use std::path::Path;
@@ -61,7 +60,7 @@ impl FileCommon for ExInode {
         self.is_dir()
     }
     fn to_string(&self) -> String {
-        self.to_string()
+        ToString::to_string(self)
     }
     fn to_json(&self) -> Value {
         self.to_json()
@@ -76,7 +75,7 @@ impl DirectoryCommon for CompatDirEntry {
         &self.name
     }
     fn to_string(&self) -> String {
-        self.to_string()
+        ToString::to_string(self)
     }
     fn to_json(&self) -> Value {
         self.to_json()
@@ -184,57 +183,18 @@ impl<T: Read + Seek> Filesystem for ExFatFS<T> {
             group: None,
             ftype,
             size: inode.size(),
+            display: Some(format!(
+                "{:016x} - {:>4} - {:>10} - {}",
+                file_id,
+                if is_dir { "DIR" } else { "FILE" },
+                inode.size(),
+                absolute_path
+            )),
             metadata: inode.to_json(),
         }
     }
 
     fn get_root_file_id(&self) -> u64 {
         root_inode_num(&self.bpb)
-    }
-
-    /// BFS enumeration starting at the synthetic root. Prints a terse line per record.
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-
-        let root_id = self.get_root_file_id();
-        queue.push_back((root_id, "/".to_string()));
-
-        while let Some((inode_num, path)) = queue.pop_front() {
-            if !visited.insert(inode_num) {
-                continue;
-            }
-
-            let inode = match self.get_file(inode_num) {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-
-            let file_obj = self.record_to_file(&inode, inode_num, &path);
-            let ty = if inode.is_dir() { "DIR" } else { "FILE" };
-            println!(
-                "{:016x} - {:>4} - {:>10} - {}",
-                inode_num,
-                ty,
-                inode.size(),
-                file_obj.absolute_path
-            );
-
-            if inode.is_dir() {
-                let entries = Filesystem::list_dir(self, &inode)?;
-                for entry in entries {
-                    let child_inode_num = entry.file_id();
-                    let name = entry.name();
-                    let child_path = if path == "/" {
-                        format!("/{}", name)
-                    } else {
-                        format!("{}/{}", path, name)
-                    };
-                    queue.push_back((child_inode_num, child_path));
-                }
-            }
-        }
-
-        Ok(())
     }
 }

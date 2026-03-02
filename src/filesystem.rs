@@ -50,7 +50,17 @@ pub struct File {
     pub permissions: Option<String>, // Permissions in some normalized form
     pub owner: Option<String>,       // Owner user name or SID/UID
     pub group: Option<String>,       // Group name or GID (Unix)
+    pub display: Option<String>,     // Custom filesystem-specific stdout formatting string
     pub metadata: Value,             // Filesystem-specific extra metadata
+}
+
+/// Dispatched events during `walk_fs`.
+#[allow(clippy::large_enum_variant)]
+pub enum WalkEvent {
+    /// A regular file or directory was discovered.
+    File(File),
+    /// An intermediate status message for long-running operations.
+    Status(String),
 }
 
 /// The Filesystem trait
@@ -65,7 +75,11 @@ pub trait Filesystem {
     fn get_metadata(&self) -> Result<Value, Box<dyn Error>>;
     fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
-    fn get_file_by_path(&mut self, _path: &str, _file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+    fn get_file_by_path(
+        &mut self,
+        _path: &str,
+        _file_id: u64,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
         Err("get_file_by_path not implemented for this filesystem".into())
     }
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
@@ -87,7 +101,61 @@ pub trait Filesystem {
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
     fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
     fn get_root_file_id(&self) -> u64;
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>>;
+
+    /// Walk the filesystem and call the callback for each file found.
+    /// This default implementation uses Breadth-First Search via `get_file` and `list_dir`.
+    fn walk_fs(&mut self, callback: &mut dyn FnMut(WalkEvent)) -> Result<(), Box<dyn Error>> {
+        use std::collections::{HashSet, VecDeque};
+        let mut seen: HashSet<u64> = HashSet::new();
+        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
+
+        let root_id = self.get_root_file_id();
+        queue.push_back((root_id, self.path_separator()));
+
+        while let Some((record_id, path)) = queue.pop_front() {
+            if !seen.insert(record_id) {
+                continue;
+            }
+
+            let record = match self.get_file(record_id) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let file_obj = self.record_to_file(&record, record_id, &path);
+            let is_dir = record.is_dir();
+
+            callback(WalkEvent::File(file_obj));
+
+            if is_dir
+                && let Ok(entries) = self.list_dir(&record)
+            {
+                for entry in entries {
+                        let child_id = entry.file_id();
+                        let child_path = if path == self.path_separator() {
+                            format!("{}{}", self.path_separator(), entry.name())
+                        } else {
+                            format!("{}{}{}", path, self.path_separator(), entry.name())
+                        };
+                        queue.push_back((child_id, child_path));
+                    }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Return all files in the filesystem
+    fn enumerate_all_files(&mut self) -> Result<Vec<File>, Box<dyn Error>> {
+        let mut files = Vec::new();
+        self.walk_fs(&mut |event| {
+            if let WalkEvent::File(f) = event {
+                files.push(f);
+            }
+        })?;
+        Ok(files)
+    }
+
     fn dump_to_fs(&mut self, file: &Self::FileType) {
         info!(
             "Dumping file {} content into 'file_{}.bin'",
@@ -100,7 +168,7 @@ pub trait Filesystem {
                 let filename = format!("file_{}.bin", file.id());
                 match StdFile::create(&filename) {
                     Ok(mut f) => {
-                        if let Err(e) = f.write_all(&data) {
+                        if let Err(e) = f.write_all(data) {
                             error!("Error writing file '{}': {}", filename, e);
                         } else {
                             info!(
@@ -124,7 +192,7 @@ pub trait Filesystem {
 
         match &self.read_file_content(file) {
             Ok(data) => {
-                println!("{}", String::from_utf8_lossy(&data));
+                println!("{}", String::from_utf8_lossy(data));
             }
             Err(e) => {
                 error!("Cannot read content for inode {}: {}", file.id(), e);
@@ -176,6 +244,11 @@ where
     #[inline]
     pub fn len(&self) -> u64 {
         self.len
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     #[inline]

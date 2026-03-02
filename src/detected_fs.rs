@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::error::Error;
 use std::io::{Read, Seek};
 
+#[allow(clippy::large_enum_variant)]
 pub enum DetectedFs<T: Read + Seek> {
     Ext(ExtFS<T>),
     Ntfs(NTFS<T>),
@@ -65,11 +66,11 @@ impl FileCommon for DetectedFile {
     }
     fn to_string(&self) -> String {
         match self {
-            DetectedFile::Ext(inode) => inode.to_string(),
-            DetectedFile::Ntfs(record) => record.to_string(),
-            DetectedFile::Exfat(inode) => inode.to_string(),
-            DetectedFile::Apfs(inode) => inode.to_string(),
-            DetectedFile::Folder(file) => file.to_string(),
+            DetectedFile::Ext(inode) => FileCommon::to_string(inode),
+            DetectedFile::Ntfs(record) => FileCommon::to_string(record),
+            DetectedFile::Exfat(inode) => FileCommon::to_string(inode),
+            DetectedFile::Apfs(inode) => FileCommon::to_string(inode),
+            DetectedFile::Folder(file) => FileCommon::to_string(file),
         }
     }
     fn to_json(&self) -> Value {
@@ -104,11 +105,11 @@ impl DirectoryCommon for DetectedDir {
     }
     fn to_string(&self) -> String {
         match self {
-            DetectedDir::Ext(d) => d.to_string(),
-            DetectedDir::Ntfs(d) => d.to_string(),
-            DetectedDir::Exfat(d) => d.to_string(),
-            DetectedDir::Apfs(d) => d.to_string(),
-            DetectedDir::Folder(d) => d.to_string(),
+            DetectedDir::Ext(d) => DirectoryCommon::to_string(d),
+            DetectedDir::Ntfs(d) => DirectoryCommon::to_string(d),
+            DetectedDir::Exfat(d) => DirectoryCommon::to_string(d),
+            DetectedDir::Apfs(d) => DirectoryCommon::to_string(d),
+            DetectedDir::Folder(d) => DirectoryCommon::to_string(d),
         }
     }
     fn to_json(&self) -> Value {
@@ -189,7 +190,11 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Folder(fs) => fs.get_file(file_id).map(DetectedFile::Folder),
         }
     }
-    fn get_file_by_path(&mut self, path: &str, file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+    fn get_file_by_path(
+        &mut self,
+        path: &str,
+        file_id: u64,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
         match self {
             DetectedFs::Ext(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Ext),
             DetectedFs::Ntfs(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Ntfs),
@@ -221,7 +226,9 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             }
 
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => fs.read_file_prefix(inode, length),
-            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.read_file_prefix(file, length),
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
+                fs.read_file_prefix(file, length)
+            }
             _ => Err("filesystem / record variant mismatch".into()),
         }
     }
@@ -270,15 +277,7 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             _ => Err("filesystem / record variant mismatch".into()),
         }
     }
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
-        match self {
-            DetectedFs::Ext(fs) => fs.enumerate(),
-            DetectedFs::Ntfs(fs) => fs.enumerate(),
-            DetectedFs::Exfat(fs) => fs.enumerate(),
-            DetectedFs::Apfs(fs) => fs.enumerate(),
-            DetectedFs::Folder(fs) => fs.enumerate(),
-        }
-    }
+
     fn get_root_file_id(&self) -> u64 {
         match self {
             DetectedFs::Ext(fs) => fs.get_root_file_id(),
@@ -286,6 +285,18 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Exfat(fs) => fs.get_root_file_id(),
             DetectedFs::Apfs(fs) => fs.get_root_file_id(),
             DetectedFs::Folder(fs) => fs.get_root_file_id(),
+        }
+    }
+    fn walk_fs(
+        &mut self,
+        callback: &mut dyn FnMut(crate::filesystem::WalkEvent),
+    ) -> Result<(), Box<dyn Error>> {
+        match self {
+            DetectedFs::Ext(fs) => fs.walk_fs(callback),
+            DetectedFs::Ntfs(fs) => fs.walk_fs(callback),
+            DetectedFs::Exfat(fs) => fs.walk_fs(callback),
+            DetectedFs::Apfs(fs) => fs.walk_fs(callback),
+            DetectedFs::Folder(fs) => fs.walk_fs(callback),
         }
     }
     fn record_to_file(&self, record: &Self::FileType, inode_num: u64, absolute_path: &str) -> File {

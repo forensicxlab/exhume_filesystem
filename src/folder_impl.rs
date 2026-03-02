@@ -1,11 +1,11 @@
 use crate::filesystem::{DirectoryCommon, File, FileCommon, Filesystem};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::error::Error;
 use std::fs::{self, File as StdFile};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone)]
 pub struct FolderFile {
@@ -67,7 +67,10 @@ impl DirectoryCommon for FolderDirectory {
         &self.name
     }
     fn to_string(&self) -> String {
-        format!("FolderDirectory {{ file_id: {}, name: {} }}", self.file_id, self.name)
+        format!(
+            "FolderDirectory {{ file_id: {}, name: {} }}",
+            self.file_id, self.name
+        )
     }
     fn to_json(&self) -> Value {
         json!({
@@ -77,7 +80,7 @@ impl DirectoryCommon for FolderDirectory {
     }
 }
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 pub struct FolderFS {
     pub root_path: PathBuf,
@@ -99,10 +102,22 @@ impl FolderFS {
 
     fn get_file_from_path(&self, path: &Path, id: u64) -> Result<FolderFile, Box<dyn Error>> {
         let metadata = fs::symlink_metadata(path)?;
-        
-        let created = metadata.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
-        let modified = metadata.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
-        let accessed = metadata.accessed().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
+
+        let created = metadata
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let accessed = metadata
+            .accessed()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
 
         Ok(FolderFile {
             id,
@@ -153,28 +168,37 @@ impl Filesystem for FolderFS {
         let path = self.path_cache.get(&file_id).ok_or_else(|| {
             format!("File ID {} not found in path cache. FolderFS requires traversal to populate cache.", file_id)
         })?;
-        
-        // We need to clone path to use it, or just use it. 
+
+        // We need to clone path to use it, or just use it.
         // get_file_from_path takes &Path.
         self.get_file_from_path(path, file_id)
     }
 
-    fn get_file_by_path(&mut self, path: &str, file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+    fn get_file_by_path(
+        &mut self,
+        path: &str,
+        file_id: u64,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
         // The path from system_files is likely "absolute" relative to the FS root (e.g. "/implant.exe").
         // We need to map this to the host filesystem path by joining with root_path.
-        let relative_path = path.trim_start_matches(|c| c == '/' || c == '\\');
+        let relative_path = path.trim_start_matches(['/', '\\']);
         let full_path = self.root_path.join(relative_path);
 
         if full_path.exists() {
             self.get_file_from_path(&full_path, file_id)
         } else {
-             // Fallback: try the path as-is just in case it was already a host path
+            // Fallback: try the path as-is just in case it was already a host path
             let mixed_path = PathBuf::from(path);
-             if mixed_path.exists() {
-                 return self.get_file_from_path(&mixed_path, file_id);
-             }
+            if mixed_path.exists() {
+                return self.get_file_from_path(&mixed_path, file_id);
+            }
 
-            Err(format!("File not found at path: {} (host: {})", path, full_path.display()).into())
+            Err(format!(
+                "File not found at path: {} (host: {})",
+                path,
+                full_path.display()
+            )
+            .into())
         }
     }
 
@@ -222,59 +246,37 @@ impl Filesystem for FolderFS {
             let ino = metadata.ino();
             let name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
-            
+
             // Populate cache
             self.path_cache.insert(ino, path);
-            
-            entries.push(FolderDirectory {
-                file_id: ino,
-                name,
-            });
+
+            entries.push(FolderDirectory { file_id: ino, name });
         }
         Ok(entries)
     }
-    
+
     fn get_root_file_id(&self) -> u64 {
         fs::metadata(&self.root_path).map(|m| m.ino()).unwrap_or(0)
-    }
-
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut queue = VecDeque::new();
-        queue.push_back(self.root_path.clone());
-
-        // Ensure root is in cache
-        if let Ok(meta) = fs::metadata(&self.root_path) {
-            self.path_cache.insert(meta.ino(), self.root_path.clone());
-        }
-
-        while let Some(path) = queue.pop_front() {
-            if let Ok(entries) = fs::read_dir(&path) {
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        let entry_path = entry.path();
-                        if let Ok(meta) = entry.metadata() {
-                            self.path_cache.insert(meta.ino(), entry_path.clone());
-                            if meta.is_dir() {
-                                queue.push_back(entry_path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     fn record_to_file(&self, file: &Self::FileType, _file_id: u64, absolute_path: &str) -> File {
         // `file` is `FolderFile` which already has metadata.
         // `absolute_path` is passed from the walker.
-        
+
         File {
             id: None, // Database ID not yet assigned
             identifier: file.id,
             absolute_path: absolute_path.to_string(),
-            name: file.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-            ftype: if file.is_dir { "Directory".to_string() } else { "File".to_string() },
+            name: file
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            ftype: if file.is_dir {
+                "Directory".to_string()
+            } else {
+                "File".to_string()
+            },
             size: file.size,
             created: file.created,
             modified: file.modified,
@@ -282,9 +284,8 @@ impl Filesystem for FolderFS {
             permissions: Some(format!("{:o}", file.permissions)),
             owner: Some(file.uid.to_string()),
             group: Some(file.gid.to_string()),
+            display: None,
             metadata: json!({}),
         }
     }
 }
-
-

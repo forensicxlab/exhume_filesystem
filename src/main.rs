@@ -1,16 +1,13 @@
 use clap::*;
 use clap_num::maybe_hex;
 use exhume_body::{Body, BodySlice};
-use exhume_filesystem::File;
 use exhume_filesystem::Filesystem;
 use exhume_filesystem::detected_fs::{DetectedFs, detect_filesystem};
-use exhume_filesystem::folder_impl::FolderFS;
 use exhume_filesystem::filesystem::DirectoryCommon;
 use exhume_filesystem::filesystem::FileCommon;
+use exhume_filesystem::folder_impl::FolderFS;
 use log::{debug, error, info};
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
-use std::error::Error;
 use std::path::Path;
 
 fn main() {
@@ -130,24 +127,23 @@ fn main() {
     let file_path = matches.get_one::<String>("body").unwrap();
     let auto = String::from("auto");
     let format = matches.get_one::<String>("format").unwrap_or(&auto);
-    
+
     // Check if path is a directory
     let path = Path::new(file_path);
     let is_directory = path.is_dir();
 
     let offset = matches.get_one::<u64>("offset");
     let size = matches.get_one::<u64>("size");
-    
+
     // Validation for non-directory inputs
-    if !is_directory {
-        if offset.is_none() || size.is_none() {
-            // Need a way to enforce required args conditionally? 
+    if !is_directory
+        && (offset.is_none() || size.is_none()) {
+            // Need a way to enforce required args conditionally?
             // Clap doesn't support conditional requirements easily.
             // We just error out here.
             error!("Offset and Size arguments are required for disk images.");
             return;
         }
-    }
 
     let file_id = matches.get_one::<usize>("record").copied().unwrap_or(0);
     let list = matches.get_flag("list");
@@ -163,7 +159,7 @@ fn main() {
     } else {
         let offset_val = *offset.unwrap();
         let size_val = *size.unwrap();
-        
+
         let body = Body::new(file_path.to_owned(), format);
         debug!("Created Body from '{}'", file_path);
 
@@ -228,18 +224,16 @@ fn main() {
                     file_id
                 );
             }
-        } else {
-            if json_output {
-                match serde_json::to_string_pretty(&file.to_json()) {
-                    Ok(json_str) => {
-                        info!("File record {} metadata:", file_id);
-                        println!("{}", json_str)
-                    }
-                    Err(e) => error!("Error serializing inode {} to JSON: {}", file_id, e),
+        } else if json_output {
+            match serde_json::to_string_pretty(&file.to_json()) {
+                Ok(json_str) => {
+                    info!("File record {} metadata:", file_id);
+                    println!("{}", json_str)
                 }
-            } else {
-                println!("{}", file.to_string());
+                Err(e) => error!("Error serializing inode {} to JSON: {}", file_id, e),
             }
+        } else {
+            println!("{}", file.to_string());
         }
 
         if dump {
@@ -247,72 +241,52 @@ fn main() {
         }
 
         if print {
-            filesystem.dump_to_std(&file);
+            match filesystem.read_file_prefix(&file, 8192) {
+                Ok(prefix) => println!("Successfully read prefix of length {}", prefix.len()),
+                Err(e) => println!("Error reading prefix: {}", e),
+            }
         }
     }
 
     if enumerate {
         if json_output {
-            let collected = match &mut filesystem {
-                DetectedFs::Apfs(fs) => fs.enumerate_all_files(),
-                _ => enumerate_collect(&mut filesystem),
-            };
+            let mut files = Vec::new();
+            let collected = filesystem.walk_fs(&mut |event| match event {
+                exhume_filesystem::filesystem::WalkEvent::File(f) => files.push(f),
+                exhume_filesystem::filesystem::WalkEvent::Status(msg) => info!("{}", msg),
+            });
             match collected {
-                Ok(files) => {
+                Ok(_) => {
                     println!("{}", serde_json::to_string_pretty(&files).unwrap());
                 }
                 Err(err) => {
                     error!("Failed JSON enumeration: {:?}", err);
                 }
             }
-        } else {
-            if let Err(err) = filesystem.enumerate() {
-                error!("Could not enumerate the files: {:?}", err);
-            }
-        }
-    }
-}
-
-fn enumerate_collect<F: Filesystem>(fs: &mut F) -> Result<Vec<File>, Box<dyn Error>> {
-    let mut out: Vec<File> = Vec::new();
-    let mut visited = HashSet::<u64>::new();
-    let mut queue = VecDeque::<(u64, String)>::new();
-
-    let sep = fs.path_separator();
-    let root_id = fs.get_root_file_id();
-    let root_path = sep.clone();
-
-    queue.push_back((root_id, root_path.clone()));
-
-    while let Some((id, path)) = queue.pop_front() {
-        if !visited.insert(id) {
-            continue;
-        }
-
-        let file_rec = match fs.get_file(id) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let file_obj = fs.record_to_file(&file_rec, id, &path);
-        out.push(file_obj.clone());
-
-        if file_rec.is_dir() {
-            let entries = match fs.list_dir(&file_rec) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            for de in entries {
-                let child_id = de.file_id();
-                let name = de.name();
-                let child_path = if path == sep {
-                    format!("{}{}", sep, name)
+        } else if let Err(err) = filesystem.walk_fs(&mut |event| match event {
+            exhume_filesystem::filesystem::WalkEvent::File(file) => {
+                if let Some(custom_display) = file.display {
+                    println!("{}", custom_display);
                 } else {
-                    format!("{}{}{}", path, sep, name)
-                };
-                queue.push_back((child_id, child_path));
+                    println!(
+                        "[{}] - {} {} {} {} {} {}",
+                        file.identifier,
+                        file.permissions
+                            .clone()
+                            .unwrap_or_else(|| "??????????".to_string()),
+                        exhume_apfs::fmt_apfs_ns_utc(
+                            file.modified.unwrap_or(0) * 1_000_000_000
+                        ),
+                        file.owner.clone().unwrap_or_else(|| "-".to_string()),
+                        file.group.clone().unwrap_or_else(|| "-".to_string()),
+                        file.size,
+                        file.absolute_path
+                    );
+                }
             }
+            exhume_filesystem::filesystem::WalkEvent::Status(msg) => info!("{}", msg),
+        }) {
+            error!("Could not enumerate the files: {:?}", err);
         }
     }
-
-    Ok(out)
 }

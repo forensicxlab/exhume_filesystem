@@ -1,12 +1,8 @@
 use crate::filesystem::{DirectoryCommon, FileCommon};
 use crate::filesystem::{File, Filesystem};
 use exhume_ntfs::NTFS;
-use exhume_ntfs::mft::{
-    Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation,
-    filetime_to_local_datetime,
-};
+use exhume_ntfs::mft::{Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Seek};
 
@@ -41,7 +37,7 @@ impl FileCommon for MFTRecord {
     }
 
     fn to_string(&self) -> String {
-        self.to_string()
+        ToString::to_string(self)
     }
 
     fn to_json(&self) -> Value {
@@ -118,7 +114,7 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
     }
 
     fn get_root_file_id(&self) -> u64 {
-        return 5;
+        5
     }
 
     fn read_file_slice(
@@ -169,6 +165,29 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
         let modified = (mft_ft != 0).then(|| filetime_to_unix_secs(mft_ft));
         let accessed = (a_ft != 0).then(|| filetime_to_unix_secs(a_ft));
 
+        let mft_ts = if mft_ft == 0 {
+            "-".to_string()
+        } else {
+            exhume_ntfs::mft::filetime_to_local_datetime(mft_ft)
+        };
+
+        let ftype_str = if record.is_dir() { "DIR" } else { "FILE" };
+        let mut display = format!(
+            "{id:<6} - {ftype:<4} - {size:>10} - {mft_ts} - {abs_path}",
+            id = file_id,
+            ftype = ftype_str,
+            size = record.size(),
+            mft_ts = mft_ts,
+            abs_path = absolute_path
+        );
+
+        for fnm in record.file_names() {
+            display.push_str(&format!("\n  - {}", fnm.name));
+        }
+        for ads in record.alternate_data_streams() {
+            display.push_str(&format!("\n  - ads:{}", ads.name));
+        }
+
         File {
             id: None,
             identifier: file_id,
@@ -182,94 +201,8 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
             group: None,
             ftype: if record.is_dir() { "Directory" } else { "File" }.into(),
             size: record.size(),
+            display: Some(display),
             metadata: record.to_json(),
         }
-    }
-    /// Builds a list of all files (and directories) in the filesystem
-    fn enumerate(&mut self) -> Result<(), Box<dyn Error>> {
-        use log::{debug, info};
-
-        let total = self.record_count();
-        info!("NTFS: walking {} MFT records…", total);
-
-        let mut cache: HashMap<u64, MFTRecord> = HashMap::new();
-
-        for id in 0..total {
-            let rec = match self.get_file(id) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            if rec.header.flags & 0x0001 == 0 {
-                // unallocated
-                continue;
-            }
-
-            let mut parts = Vec::<String>::new();
-            let mut cur = rec.clone();
-            let mut cur_id = id;
-            for _ in 0..512 {
-                let nm = cur
-                    .primary_name()
-                    .unwrap_or_else(|| format!("MFT_{}", cur_id));
-                parts.push(nm);
-                match cur.parent_file_id() {
-                    Some(pid) if pid != cur_id => {
-                        cur_id = pid;
-                        if let Some(p) = cache.get(&pid) {
-                            cur = p.clone();
-                        } else {
-                            match self.get_file(pid) {
-                                Ok(p) => {
-                                    cur = p.clone();
-                                    cache.insert(pid, p);
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                    _ => break,
-                }
-            }
-            parts.reverse();
-            let abs_path = format!(r"\{}", parts.join(r"\"));
-
-            let names: Vec<String> = rec.file_names().into_iter().map(|f| f.name).collect();
-
-            let ads: Vec<String> = rec
-                .alternate_data_streams()
-                .into_iter()
-                .map(|d| d.name)
-                .collect();
-
-            // 1st $STANDARD_INFORMATION has the authoritative timestamps
-            let mft_ts = rec
-                .attributes
-                .iter()
-                .find_map(|a| match a {
-                    Attribute::Resident { header, value, .. }
-                        if header.attr_type == AttributeType::StandardInformation =>
-                    {
-                        StandardInformation::from_bytes(value).map(|si| si.mft_modified)
-                    }
-                    _ => None,
-                })
-                .map(|ft| filetime_to_local_datetime(ft))
-                .unwrap_or_else(|| "-".to_string());
-
-            let ftype = if rec.is_dir() { "DIR" } else { "FILE" };
-            let size = rec.size();
-
-            println!("{id:<6} - {ftype:<4} - {size:>10} - {mft_ts} - {abs_path}");
-
-            for n in names {
-                println!("  - {n}");
-            }
-            for s in ads {
-                println!("  - ads:{s}");
-            }
-        }
-
-        debug!("NTFS enumeration finished.");
-        Ok(())
     }
 }
