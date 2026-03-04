@@ -32,3 +32,4 @@ sqlx = { version = "0.8.6", features = [
     "runtime-tokio-native-tls",
     "macros",
 ] }
+hex = "0.4.3"

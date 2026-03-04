@@ -1,8 +1,8 @@
 use clap::*;
 use clap_num::maybe_hex;
-use exhume_body::{Body, BodySlice};
+use exhume_body::Body;
 use exhume_filesystem::Filesystem;
-use exhume_filesystem::detected_fs::{DetectedFs, detect_filesystem};
+use exhume_filesystem::detected_fs::{detect_filesystem, DetectedFs, KeyMaterial};
 use exhume_filesystem::filesystem::DirectoryCommon;
 use exhume_filesystem::filesystem::FileCommon;
 use exhume_filesystem::folder_impl::FolderFS;
@@ -55,7 +55,12 @@ fn main() {
                 .value_parser(maybe_hex::<usize>)
                 .help("Display the metadata about a specific file record using its record identifier."),
         )
-
+        .arg(
+            Arg::new("fvek")
+                .long("fvek")
+                .value_parser(value_parser!(String))
+                .help("Full Volume Encryption Key (FVEK) for BitLocker, in hex format"),
+        )
         .arg(
             Arg::new("enum")
                 .short('e')
@@ -153,7 +158,19 @@ fn main() {
     let dump = matches.get_flag("dump");
     let json_output = matches.get_flag("json");
 
-    let mut filesystem: DetectedFs<BodySlice> = if is_directory {
+    let mut keys = None;
+    if let Some(fvek_hex) = matches.get_one::<String>("fvek") {
+        if let Ok(fvek_bytes) = hex::decode(fvek_hex) {
+            keys = Some(KeyMaterial {
+                bitlocker_fvek: Some(fvek_bytes),
+            });
+        } else {
+            error!("Provided FVEK is not a valid hex string.");
+            return;
+        }
+    }
+
+    let mut filesystem: DetectedFs<exhume_filesystem::detected_fs::ImageStream> = if is_directory {
         let fs = FolderFS::new(path.to_path_buf());
         DetectedFs::Folder(fs)
     } else {
@@ -165,7 +182,7 @@ fn main() {
 
         let partition_size = size_val * body.get_sector_size() as u64;
 
-        match detect_filesystem(&body, offset_val, partition_size) {
+        match detect_filesystem(&body, offset_val, partition_size, keys) {
             Ok(fs) => fs,
             Err(e) => {
                 error!("Could not detect the provided filesystem: {e:?}");

@@ -9,7 +9,36 @@ use exhume_ntfs::NTFS;
 use log::info;
 use serde_json::Value;
 use std::error::Error;
-use std::io::{Read, Seek};
+use std::io::{self, Read, Seek, SeekFrom};
+use exhume_ntfs::bitlocker::BitLockerStream;
+
+#[derive(Debug, Clone, Default)]
+pub struct KeyMaterial {
+    pub bitlocker_fvek: Option<Vec<u8>>,
+}
+
+pub enum ImageStream {
+    Raw(BodySlice),
+    BitLocker(BitLockerStream<BodySlice>),
+}
+
+impl Read for ImageStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            ImageStream::Raw(slice) => slice.read(buf),
+            ImageStream::BitLocker(bl) => bl.read(buf),
+        }
+    }
+}
+
+impl Seek for ImageStream {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match self {
+            ImageStream::Raw(slice) => slice.seek(pos),
+            ImageStream::BitLocker(bl) => bl.seek(pos),
+        }
+    }
+}
 
 #[allow(clippy::large_enum_variant)]
 pub enum DetectedFs<T: Read + Seek> {
@@ -325,17 +354,18 @@ pub fn detect_filesystem(
     body: &Body,
     offset: u64,
     partition_size: u64,
-) -> Result<DetectedFs<BodySlice>, Box<dyn std::error::Error>> {
+    keys: Option<KeyMaterial>,
+) -> Result<DetectedFs<ImageStream>, Box<dyn std::error::Error>> {
     let partition = BodySlice::new(body, offset, partition_size)
         .map_err(|e| format!("Could not create BodySlice: {e}"))?;
-    if let Ok(ext_fs) = ExtFS::new(partition) {
+    if let Ok(ext_fs) = ExtFS::new(ImageStream::Raw(partition)) {
         info!("Detected an Extended filesystem.");
         return Ok(DetectedFs::Ext(ext_fs));
     }
 
     let partition = BodySlice::new(body, offset, partition_size)
         .map_err(|e| format!("Could not create BodySlice: {e}"))?;
-    if let Ok(apfs) = APFS::new(partition)
+    if let Ok(apfs) = APFS::new(ImageStream::Raw(partition))
         && let Ok(apfs_fs) = ApfsFs::new(apfs)
     {
         info!("Detected an APFS filesystem/container.");
@@ -344,16 +374,45 @@ pub fn detect_filesystem(
 
     let partition = BodySlice::new(body, offset, partition_size)
         .map_err(|e| format!("Could not create BodySlice: {e}"))?;
-    if let Ok(exfat) = ExFatFS::new(partition) {
+    if let Ok(exfat) = ExFatFS::new(ImageStream::Raw(partition)) {
         info!("Detected an exFAT filesystem.");
         return Ok(DetectedFs::Exfat(exfat));
     }
 
     let partition = BodySlice::new(body, offset, partition_size)
         .map_err(|e| format!("Could not create BodySlice: {e}"))?;
-    if let Ok(ntfs) = NTFS::new(partition) {
-        info!("Detected an NT filesystem.");
-        return Ok(DetectedFs::Ntfs(ntfs));
+    match NTFS::new(ImageStream::Raw(partition)) {
+        Ok(ntfs) => {
+            info!("Detected an NT filesystem.");
+            return Ok(DetectedFs::Ntfs(ntfs));
+        }
+        Err(e) if e.to_string().contains("-FVE-FS-") => {
+            if let Some(mut km) = keys {
+                if let Some(fvek) = km.bitlocker_fvek.take() {
+                    info!("BitLocker detected. Attempting to decrypt with provided FVEK...");
+                    let partition_for_bl = BodySlice::new(body, offset, partition_size)
+                        .map_err(|e| format!("Could not create BodySlice for BL: {e}"))?;
+                    
+                    match BitLockerStream::new(partition_for_bl, &fvek, 512) {
+                        Ok(bl_stream) => {
+                            match NTFS::new(ImageStream::BitLocker(bl_stream)) {
+                                Ok(ntfs) => {
+                                    info!("Successfully detected BitLocker-decrypted NT filesystem.");
+                                    return Ok(DetectedFs::Ntfs(ntfs));
+                                }
+                                Err(err) => return Err(format!("Failed to parse NTFS over BitLocker: {}", err).into()),
+                            }
+                        }
+                        Err(err) => return Err(format!("Failed to initialize BitLocker stream: {}", err).into()),
+                    }
+                } else {
+                    return Err("Partition is BitLocker-encrypted (-FVE-FS-) but no FVEK was provided.".into());
+                }
+            } else {
+                return Err("Partition is BitLocker-encrypted (-FVE-FS-) but no keys were provided.".into());
+            }
+        }
+        Err(_) => {}
     }
 
     Err(format!("No supported filesystem detected at offset {offset}").into())

@@ -1,7 +1,10 @@
 use crate::filesystem::{DirectoryCommon, FileCommon};
 use crate::filesystem::{File, Filesystem};
 use exhume_ntfs::NTFS;
-use exhume_ntfs::mft::{Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation};
+use exhume_ntfs::mft::{
+    Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation,
+    REPARSE_TAG_MOUNT_POINT, REPARSE_TAG_SYMLINK,
+};
 use serde_json::Value;
 use std::error::Error;
 use std::io::{Read, Seek};
@@ -171,21 +174,49 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
             exhume_ntfs::mft::filetime_to_local_datetime(mft_ft)
         };
 
-        let ftype_str = if record.is_dir() { "DIR" } else { "FILE" };
+        let mut ftype = if record.is_dir() {
+            "Directory".to_string()
+        } else {
+            "File".to_string()
+        };
+
+        let mut reparse_info = None;
+        if let Some(rp) = record.reparse_point() {
+            reparse_info = Some(rp.clone());
+            if rp.tag == REPARSE_TAG_SYMLINK {
+                ftype = "Symlink".to_string();
+            } else if rp.tag == REPARSE_TAG_MOUNT_POINT {
+                ftype = "Junction".to_string();
+            } else {
+                ftype = format!("Reparse (0x{:X})", rp.tag);
+            }
+        }
+
         let mut display = format!(
-            "{id:<6} - {ftype:<4} - {size:>10} - {mft_ts} - {abs_path}",
+            "{id:<6} - {ftype:<10} - {size:>10} - {mft_ts} - {abs_path}",
             id = file_id,
-            ftype = ftype_str,
+            ftype = ftype,
             size = record.size(),
             mft_ts = mft_ts,
             abs_path = absolute_path
         );
+
+        if let Some(ref rp) = reparse_info {
+            if let Some(ref target) = rp.target {
+                display.push_str(&format!("\n  -> {}", target));
+            }
+        }
 
         for fnm in record.file_names() {
             display.push_str(&format!("\n  - {}", fnm.name));
         }
         for ads in record.alternate_data_streams() {
             display.push_str(&format!("\n  - ads:{}", ads.name));
+        }
+
+        let mut metadata = record.to_json();
+        if let Some(rp) = reparse_info {
+            metadata["reparse"] = serde_json::to_value(rp).unwrap_or(Value::Null);
         }
 
         File {
@@ -199,10 +230,10 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
             permissions: None,
             owner: None,
             group: None,
-            ftype: if record.is_dir() { "Directory" } else { "File" }.into(),
+            ftype,
             size: record.size(),
             display: Some(display),
-            metadata: record.to_json(),
+            metadata,
         }
     }
 }
