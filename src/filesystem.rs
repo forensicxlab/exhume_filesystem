@@ -127,18 +127,16 @@ pub trait Filesystem {
 
             callback(WalkEvent::File(file_obj));
 
-            if is_dir
-                && let Ok(entries) = self.list_dir(&record)
-            {
+            if is_dir && let Ok(entries) = self.list_dir(&record) {
                 for entry in entries {
-                        let child_id = entry.file_id();
-                        let child_path = if path == self.path_separator() {
-                            format!("{}{}", self.path_separator(), entry.name())
-                        } else {
-                            format!("{}{}{}", path, self.path_separator(), entry.name())
-                        };
-                        queue.push_back((child_id, child_path));
-                    }
+                    let child_id = entry.file_id();
+                    let child_path = if path == self.path_separator() {
+                        format!("{}{}", self.path_separator(), entry.name())
+                    } else {
+                        format!("{}{}{}", path, self.path_separator(), entry.name())
+                    };
+                    queue.push_back((child_id, child_path));
+                }
             }
         }
 

@@ -436,16 +436,16 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
                     && let Some(children) = drecs.get(&inode_id)
                 {
                     for de in children {
-                            let Some(child_inode) = de.inode_id else {
-                                continue;
-                            };
-                            let child_path = if path == vol_prefix {
-                                format!("{}/{}", vol_prefix, de.name)
-                            } else {
-                                format!("{}/{}", path, de.name)
-                            };
-                            queue.push_back((child_inode, child_path));
-                        }
+                        let Some(child_inode) = de.inode_id else {
+                            continue;
+                        };
+                        let child_path = if path == vol_prefix {
+                            format!("{}/{}", vol_prefix, de.name)
+                        } else {
+                            format!("{}/{}", path, de.name)
+                        };
+                        queue.push_back((child_inode, child_path));
+                    }
                 }
             }
         }

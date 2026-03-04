@@ -6,11 +6,11 @@ use exhume_body::{Body, BodySlice};
 use exhume_exfat::ExFatFS;
 use exhume_extfs::ExtFS;
 use exhume_ntfs::NTFS;
+use exhume_ntfs::bitlocker::BitLockerStream;
 use log::info;
 use serde_json::Value;
 use std::error::Error;
 use std::io::{self, Read, Seek, SeekFrom};
-use exhume_ntfs::bitlocker::BitLockerStream;
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyMaterial {
@@ -392,24 +392,37 @@ pub fn detect_filesystem(
                     info!("BitLocker detected. Attempting to decrypt with provided FVEK...");
                     let partition_for_bl = BodySlice::new(body, offset, partition_size)
                         .map_err(|e| format!("Could not create BodySlice for BL: {e}"))?;
-                    
+
                     match BitLockerStream::new(partition_for_bl, &fvek, 512) {
-                        Ok(bl_stream) => {
-                            match NTFS::new(ImageStream::BitLocker(bl_stream)) {
-                                Ok(ntfs) => {
-                                    info!("Successfully detected BitLocker-decrypted NT filesystem.");
-                                    return Ok(DetectedFs::Ntfs(ntfs));
-                                }
-                                Err(err) => return Err(format!("Failed to parse NTFS over BitLocker: {}", err).into()),
+                        Ok(bl_stream) => match NTFS::new(ImageStream::BitLocker(bl_stream)) {
+                            Ok(ntfs) => {
+                                info!("Successfully detected BitLocker-decrypted NT filesystem.");
+                                return Ok(DetectedFs::Ntfs(ntfs));
                             }
+                            Err(err) => {
+                                return Err(format!(
+                                    "Failed to parse NTFS over BitLocker: {}",
+                                    err
+                                )
+                                .into());
+                            }
+                        },
+                        Err(err) => {
+                            return Err(
+                                format!("Failed to initialize BitLocker stream: {}", err).into()
+                            );
                         }
-                        Err(err) => return Err(format!("Failed to initialize BitLocker stream: {}", err).into()),
                     }
                 } else {
-                    return Err("Partition is BitLocker-encrypted (-FVE-FS-) but no FVEK was provided.".into());
+                    return Err(
+                        "Partition is BitLocker-encrypted (-FVE-FS-) but no FVEK was provided."
+                            .into(),
+                    );
                 }
             } else {
-                return Err("Partition is BitLocker-encrypted (-FVE-FS-) but no keys were provided.".into());
+                return Err(
+                    "Partition is BitLocker-encrypted (-FVE-FS-) but no keys were provided.".into(),
+                );
             }
         }
         Err(_) => {}

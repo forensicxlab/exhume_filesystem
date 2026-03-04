@@ -2,7 +2,7 @@ use clap::*;
 use clap_num::maybe_hex;
 use exhume_body::Body;
 use exhume_filesystem::Filesystem;
-use exhume_filesystem::detected_fs::{detect_filesystem, DetectedFs, KeyMaterial};
+use exhume_filesystem::detected_fs::{DetectedFs, KeyMaterial, detect_filesystem};
 use exhume_filesystem::filesystem::DirectoryCommon;
 use exhume_filesystem::filesystem::FileCommon;
 use exhume_filesystem::folder_impl::FolderFS;
@@ -141,14 +141,13 @@ fn main() {
     let size = matches.get_one::<u64>("size");
 
     // Validation for non-directory inputs
-    if !is_directory
-        && (offset.is_none() || size.is_none()) {
-            // Need a way to enforce required args conditionally?
-            // Clap doesn't support conditional requirements easily.
-            // We just error out here.
-            error!("Offset and Size arguments are required for disk images.");
-            return;
-        }
+    if !is_directory && (offset.is_none() || size.is_none()) {
+        // Need a way to enforce required args conditionally?
+        // Clap doesn't support conditional requirements easily.
+        // We just error out here.
+        error!("Offset and Size arguments are required for disk images.");
+        return;
+    }
 
     let file_id = matches.get_one::<usize>("record").copied().unwrap_or(0);
     let list = matches.get_flag("list");
@@ -291,9 +290,7 @@ fn main() {
                         file.permissions
                             .clone()
                             .unwrap_or_else(|| "??????????".to_string()),
-                        exhume_apfs::fmt_apfs_ns_utc(
-                            file.modified.unwrap_or(0) * 1_000_000_000
-                        ),
+                        exhume_apfs::fmt_apfs_ns_utc(file.modified.unwrap_or(0) * 1_000_000_000),
                         file.owner.clone().unwrap_or_else(|| "-".to_string()),
                         file.group.clone().unwrap_or_else(|| "-".to_string()),
                         file.size,
