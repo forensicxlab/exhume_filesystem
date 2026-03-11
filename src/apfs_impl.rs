@@ -370,6 +370,9 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
                 file.size(),
                 absolute_path
             )),
+            sig_name: None,
+            sig_mime: None,
+            sig_exts: None,
             metadata: file.to_json(),
         }
     }

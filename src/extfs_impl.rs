@@ -171,6 +171,9 @@ impl<T: Read + Seek> Filesystem for ExtFS<T> {
                 inode.i_mtime_h,
                 absolute_path
             )),
+            sig_name: None,
+            sig_mime: None,
+            sig_exts: None,
             metadata: inode.to_json(),
         }
     }

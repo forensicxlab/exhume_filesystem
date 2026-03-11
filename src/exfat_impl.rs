@@ -190,6 +190,9 @@ impl<T: Read + Seek> Filesystem for ExFatFS<T> {
                 inode.size(),
                 absolute_path
             )),
+            sig_name: None,
+            sig_mime: None,
+            sig_exts: None,
             metadata: inode.to_json(),
         }
     }

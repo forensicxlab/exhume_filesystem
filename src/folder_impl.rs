@@ -285,6 +285,9 @@ impl Filesystem for FolderFS {
             owner: Some(file.uid.to_string()),
             group: Some(file.gid.to_string()),
             display: None,
+            sig_name: None,
+            sig_mime: None,
+            sig_exts: None,
             metadata: json!({}),
         }
     }

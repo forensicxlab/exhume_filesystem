@@ -212,6 +212,9 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
             ftype,
             size: record.size(),
             display: Some(display),
+            sig_name: None,
+            sig_mime: None,
+            sig_exts: None,
             metadata,
         }
     }

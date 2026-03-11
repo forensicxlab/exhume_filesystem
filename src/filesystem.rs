@@ -51,6 +51,9 @@ pub struct File {
     pub owner: Option<String>,       // Owner user name or SID/UID
     pub group: Option<String>,       // Group name or GID (Unix)
     pub display: Option<String>,     // Custom filesystem-specific stdout formatting string
+    pub sig_name: Option<String>,    // Identified signature name (e.g. "Executable and Linkable Format")
+    pub sig_mime: Option<String>,    // Identified MIME type (comma separated)
+    pub sig_exts: Option<String>,    // Identified extensions (comma separated)
     pub metadata: Value,             // Filesystem-specific extra metadata
 }
 
@@ -262,7 +265,10 @@ where
         }
 
         let want = (self.len - at).min(CACHE_SIZE as u64) as usize;
-        let data = self.fs.read_file_slice(&self.file, at, want).unwrap();
+        let data = self
+            .fs
+            .read_file_slice(&self.file, at, want)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         self.cache_start = at;
         self.cache = data;
         Ok(())

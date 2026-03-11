@@ -430,3 +430,10 @@ pub fn detect_filesystem(
 
     Err(format!("No supported filesystem detected at offset {offset}").into())
 }
+
+pub fn detect_filesystem_from_path(
+    path: &str,
+) -> Result<DetectedFs<ImageStream>, Box<dyn std::error::Error>> {
+    let folder_fs = FolderFS::new(std::path::PathBuf::from(path));
+    Ok(DetectedFs::Folder(folder_fs))
+}
