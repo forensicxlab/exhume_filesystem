@@ -514,15 +514,6 @@ impl<T: Read + Seek> ApfsFs<T> {
                     .checked_mul(bs)
                     .and_then(|x| x.checked_add(rel_in_ext))
                     .ok_or("physical offset overflow")?;
-                println!(
-                    "DEBUG: extent id={}, log_start={}, log_len={}, log_end={}, phys_block={}, phys_byte={}",
-                    file.inode_id,
-                    e.logical_addr,
-                    e.length_bytes,
-                    ext_end,
-                    e.phys_block_num,
-                    phys_byte
-                );
                 self.apfs.body.seek(SeekFrom::Start(phys_byte))?;
                 self.apfs.body.read_exact(&mut buf)?;
             }

@@ -51,10 +51,10 @@ pub struct File {
     pub owner: Option<String>,       // Owner user name or SID/UID
     pub group: Option<String>,       // Group name or GID (Unix)
     pub display: Option<String>,     // Custom filesystem-specific stdout formatting string
-    pub sig_name: Option<String>,    // Identified signature name (e.g. "Executable and Linkable Format")
-    pub sig_mime: Option<String>,    // Identified MIME type (comma separated)
-    pub sig_exts: Option<String>,    // Identified extensions (comma separated)
-    pub metadata: Value,             // Filesystem-specific extra metadata
+    pub sig_name: Option<String>, // Identified signature name (e.g. "Executable and Linkable Format")
+    pub sig_mime: Option<String>, // Identified MIME type (comma separated)
+    pub sig_exts: Option<String>, // Identified extensions (comma separated)
+    pub metadata: Value,          // Filesystem-specific extra metadata
 }
 
 /// Dispatched events during `walk_fs`.
