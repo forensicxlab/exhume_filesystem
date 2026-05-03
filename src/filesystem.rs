@@ -80,10 +80,24 @@ pub trait Filesystem {
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
     fn get_file_by_path(
         &mut self,
-        _path: &str,
+        path: &str,
         _file_id: u64,
     ) -> Result<Self::FileType, Box<dyn Error>> {
-        Err("get_file_by_path not implemented for this filesystem".into())
+        let components: Vec<&str> = path
+            .split(['/', '\\'])
+            .filter(|c| !c.is_empty())
+            .collect();
+        let root_id = self.get_root_file_id();
+        let mut current = self.get_file(root_id)?;
+        for component in &components {
+            let entries = self.list_dir(&current)?;
+            let entry = entries
+                .into_iter()
+                .find(|e| e.name() == *component)
+                .ok_or_else(|| format!("path component not found: {:?}", component))?;
+            current = self.get_file(entry.file_id())?;
+        }
+        Ok(current)
     }
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>>;
     fn read_file_prefix(

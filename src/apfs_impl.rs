@@ -3,7 +3,8 @@ use exhume_apfs::{APFS, ApfsVolumeSuperblock, DirEntry, FsTree, InodeVal, apfs_k
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
+use log::warn;
 use std::path::Path;
 
 const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
@@ -88,16 +89,16 @@ impl<T: Read + Seek> ApfsFs<T> {
         })
     }
 
-    fn get_fstree(&mut self, fs_index: u32) -> Result<FsTree, Box<dyn Error>> {
-        if let Some(tree) = self.cached_trees.get(&fs_index) {
-            return Ok(tree.clone());
+    fn ensure_fstree(&mut self, fs_index: u32) -> Result<(), Box<dyn Error>> {
+        if self.cached_trees.contains_key(&fs_index) {
+            return Ok(());
         }
         let vol = self
             .volume_by_index(fs_index)
             .ok_or_else(|| format!("Volume with fs_index {} not found", fs_index))?;
         let tree = self.apfs.open_fstree_for_volume(&vol)?;
-        self.cached_trees.insert(fs_index, tree.clone());
-        Ok(tree)
+        self.cached_trees.insert(fs_index, tree);
+        Ok(())
     }
 
     fn volume_by_index(&self, fs_index: u32) -> Option<ApfsVolumeSuperblock> {
@@ -259,7 +260,8 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
                 (self.volume.fs_index, file_id, self.volume.clone())
             };
 
-        let fst = self.get_fstree(fs_index)?;
+        self.ensure_fstree(fs_index)?;
+        let fst = self.cached_trees.get(&fs_index).unwrap();
         if let Some(inode) = fst.inode_by_id(&mut self.apfs, inode_query)? {
             return Ok(ApfsFileRecord {
                 fs_index,
@@ -284,8 +286,11 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
     }
 
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>> {
-        let fst = self.get_fstree(file.fs_index)?;
-        let size = file.effective_size(&mut self.apfs, &fst);
+        self.ensure_fstree(file.fs_index)?;
+        let size = {
+            let fst = self.cached_trees.get(&file.fs_index).unwrap();
+            file.effective_size(&mut self.apfs, fst)
+        };
         if size > MAX_READ_BYTES {
             return Err(format!(
                 "refusing to allocate {} bytes (cap={} bytes)",
@@ -302,8 +307,11 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         file: &Self::FileType,
         length: usize,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
-        let fst = self.get_fstree(file.fs_index)?;
-        let size = file.effective_size(&mut self.apfs, &fst);
+        self.ensure_fstree(file.fs_index)?;
+        let size = {
+            let fst = self.cached_trees.get(&file.fs_index).unwrap();
+            file.effective_size(&mut self.apfs, fst)
+        };
         let to_read = length.min(size as usize);
         self.read_file_slice_with_size(file, 0, to_read, size)
     }
@@ -314,8 +322,11 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
-        let fst = self.get_fstree(file.fs_index)?;
-        let size = file.effective_size(&mut self.apfs, &fst);
+        self.ensure_fstree(file.fs_index)?;
+        let size = {
+            let fst = self.cached_trees.get(&file.fs_index).unwrap();
+            file.effective_size(&mut self.apfs, fst)
+        };
         self.read_file_slice_with_size(file, offset, length, size)
     }
 
@@ -326,7 +337,8 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         if !inode.is_dir() {
             return Err("not a directory".into());
         }
-        let fst = self.get_fstree(inode.fs_index)?;
+        self.ensure_fstree(inode.fs_index)?;
+        let fst = self.cached_trees.get(&inode.fs_index).unwrap();
         let entries: Vec<DirEntry> = fst.dir_children(&mut self.apfs, inode.inode_id)?;
         Ok(entries
             .into_iter()
@@ -381,6 +393,56 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         self.root_inode_id
     }
 
+    fn get_file_by_path(&mut self, path: &str, _file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+        let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        if components.is_empty() {
+            return Err("empty path".into());
+        }
+
+        // First component is "volume_N" → extract fs_index
+        let vol_component = components.remove(0);
+        let fs_index: u32 = if let Some(n) = vol_component.strip_prefix("volume_") {
+            n.parse().map_err(|_| format!("invalid volume component: {}", vol_component))?
+        } else {
+            return Err(format!("expected volume_N prefix, got: {}", vol_component).into());
+        };
+
+        let root_inode_id = self
+            .valid_volumes
+            .iter()
+            .find(|(v, _)| v.fs_index == fs_index)
+            .map(|(_, id)| *id)
+            .ok_or_else(|| format!("no valid volume with fs_index={}", fs_index))?;
+
+        self.ensure_fstree(fs_index)?;
+
+        let root_inode = {
+            let fst = self.cached_trees.get(&fs_index).unwrap();
+            fst.inode_by_id(&mut self.apfs, root_inode_id)?
+                .ok_or_else(|| format!("root inode {} not found", root_inode_id))?
+        };
+
+        let mut current = ApfsFileRecord { fs_index, inode_id: root_inode_id, inode: root_inode };
+
+        for component in components {
+            let entries = self.list_dir(&current)?;
+            let entry = entries
+                .into_iter()
+                .find(|e| e.name() == component)
+                .ok_or_else(|| format!("path component not found: {:?}", component))?;
+
+            self.ensure_fstree(fs_index)?;
+            let inode = {
+                let fst = self.cached_trees.get(&fs_index).unwrap();
+                fst.inode_by_id(&mut self.apfs, entry.inode_id)?
+                    .ok_or_else(|| format!("inode {} not found", entry.inode_id))?
+            };
+            current = ApfsFileRecord { fs_index, inode_id: entry.inode_id, inode };
+        }
+
+        Ok(current)
+    }
+
     fn walk_fs(
         &mut self,
         callback: &mut dyn FnMut(crate::filesystem::WalkEvent),
@@ -388,7 +450,8 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         let vols = self.valid_volumes.clone();
 
         for (vol, root_inode_id) in vols {
-            let fst = self.get_fstree(vol.fs_index)?;
+            self.ensure_fstree(vol.fs_index)?;
+            let fst = self.cached_trees.get(&vol.fs_index).unwrap();
 
             callback(crate::filesystem::WalkEvent::Status(format!(
                 "Scanning APFS volume {} B-Tree...",
@@ -483,15 +546,19 @@ impl<T: Read + Seek> ApfsFs<T> {
             .map_err(|_| "requested slice length does not fit usize")?;
         let mut out = vec![0u8; req_len];
 
-        let fst = self.get_fstree(file.fs_index)?;
-        let mut ext = fst
-            .file_extents(&mut self.apfs, file.inode_id)
-            .unwrap_or_default();
-        if ext.is_empty() && file.inode.private_id != 0 {
-            ext = fst
-                .file_extents(&mut self.apfs, file.inode.private_id)
+        self.ensure_fstree(file.fs_index)?;
+        let ext = {
+            let fst = self.cached_trees.get(&file.fs_index).unwrap();
+            let mut ext = fst
+                .file_extents(&mut self.apfs, file.inode_id)
                 .unwrap_or_default();
-        }
+            if ext.is_empty() && file.inode.private_id != 0 {
+                ext = fst
+                    .file_extents(&mut self.apfs, file.inode.private_id)
+                    .unwrap_or_default();
+            }
+            ext
+        };
 
         let bs = self.apfs.block_size_u64();
         for e in ext {
@@ -514,8 +581,16 @@ impl<T: Read + Seek> ApfsFs<T> {
                     .checked_mul(bs)
                     .and_then(|x| x.checked_add(rel_in_ext))
                     .ok_or("physical offset overflow")?;
-                self.apfs.body.seek(SeekFrom::Start(phys_byte))?;
-                self.apfs.body.read_exact(&mut buf)?;
+                match self.apfs.body.seek(SeekFrom::Start(phys_byte)) {
+                    Ok(_) => self.apfs.body.read_exact(&mut buf)?,
+                    Err(io_err) if io_err.kind() == io::ErrorKind::InvalidInput => {
+                        warn!(
+                            "inode {}: extent phys_block={} maps to byte {} outside image slice; treating as sparse",
+                            file.inode_id, e.phys_block_num, phys_byte
+                        );
+                    }
+                    Err(io_err) => return Err(Box::new(io_err)),
+                }
             }
 
             let dst_off =
