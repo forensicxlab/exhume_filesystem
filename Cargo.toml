@@ -1,20 +1,22 @@
 [package]
 name = "exhume_filesystem"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 description = "This exhume module is proposing a standard abstraction layer of a FileSystem, File and Directory for any exhume filesystem modules (extfs, ...)."
 documentation = "https://www.forensicxlab.com/docs/category/exhume---filesystem"
+repository = "https://github.com/forensicxlab/exhume_filesystem"
+readme = "README.md"
 authors = ["k1nd0ne"]
 license = "GPL-2.0-or-later"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-exhume_body = "=0.5.5"
-exhume_extfs = "=0.1.16"
-exhume_ntfs = "=0.1.16"
-exhume_exfat = "=0.1.10"
-exhume_apfs = "=0.1.6"
+exhume_body = "=0.5.6"
+exhume_extfs = "=0.1.17"
+exhume_ntfs = "=0.1.17"
+exhume_exfat = "=0.1.11"
+exhume_apfs = "=0.1.7"
 
 #exhume_extfs = { path = "../exhume_extfs", version = "=0.1.13" }
 #exhume_ntfs = { path = "../exhume_ntfs", version = "=0.1.13" }
@@ -33,3 +35,6 @@ sqlx = { version = "0.8.6", features = [
     "macros",
 ] }
 hex = "0.4.3"
+flate2 = "1"
+lzfse_rust = "0.2"
+lzvn = { package = "lzvn-core", version = "0.1" }

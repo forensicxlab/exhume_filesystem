@@ -1,10 +1,14 @@
+use crate::decmpfs::{self, Algorithm, DecodeLimits, Storage as DecmpfsStorage};
 use crate::filesystem::{DirectoryCommon, File, FileCommon, Filesystem};
-use exhume_apfs::{APFS, ApfsVolumeSuperblock, DirEntry, FsTree, InodeVal, apfs_kind, is_dir_mode};
+use exhume_apfs::{
+    APFS, ApfsVolumeSuperblock, DirEntry, FsTree, INODE_HAS_UNCOMPRESSED_SIZE, InodeVal,
+    XattrRecord, XattrStorage, apfs_kind, is_dir_mode,
+};
+use log::warn;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::io::{self, Read, Seek, SeekFrom};
-use log::warn;
 use std::path::Path;
 
 const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
@@ -15,6 +19,9 @@ pub struct ApfsFileRecord {
     pub fs_index: u32,
     pub inode_id: u64,
     pub inode: InodeVal,
+    /// Extended attributes owned by this inode. Stream-backed values remain
+    /// lazy and are resolved only when explicitly read.
+    pub xattrs: Vec<XattrRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +114,40 @@ impl<T: Read + Seek> ApfsFs<T> {
             .find(|(v, _)| v.fs_index == fs_index)
             .map(|(v, _)| v.clone())
     }
+
+    fn load_xattrs(
+        &mut self,
+        fs_index: u32,
+        inode_id: u64,
+        private_id: u64,
+    ) -> Result<Vec<XattrRecord>, Box<dyn Error>> {
+        self.ensure_fstree(fs_index)?;
+        let fst = self.cached_trees.get(&fs_index).unwrap();
+        let mut records = fst.xattrs_for_inode(&mut self.apfs, inode_id)?;
+        if records.is_empty() && private_id != 0 && private_id != inode_id {
+            records = fst.xattrs_for_inode(&mut self.apfs, private_id)?;
+        }
+        Ok(records)
+    }
+
+    /// Returns the parsed APFS extended-attribute descriptors for a file.
+    pub fn list_xattrs<'a>(&self, file: &'a ApfsFileRecord) -> &'a [XattrRecord] {
+        &file.xattrs
+    }
+
+    /// Reads one APFS extended attribute, resolving stream-backed values.
+    pub fn read_xattr(
+        &mut self,
+        file: &ApfsFileRecord,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+        let Some(record) = file.xattrs.iter().find(|record| record.name == name) else {
+            return Ok(None);
+        };
+        self.ensure_fstree(file.fs_index)?;
+        let fst = self.cached_trees.get(&file.fs_index).unwrap();
+        Ok(Some(fst.read_xattr_record(&mut self.apfs, record)?))
+    }
 }
 
 impl FileCommon for ApfsFileRecord {
@@ -115,11 +156,15 @@ impl FileCommon for ApfsFileRecord {
     }
 
     fn size(&self) -> u64 {
-        self.inode
-            .dstream
-            .as_ref()
-            .map(|d| d.size)
-            .unwrap_or(self.inode.uncompressed_size)
+        if self.inode.internal_flags & INODE_HAS_UNCOMPRESSED_SIZE != 0 {
+            self.inode.uncompressed_size
+        } else {
+            self.inode
+                .dstream
+                .as_ref()
+                .map(|d| d.size)
+                .unwrap_or(self.inode.uncompressed_size)
+        }
     }
 
     fn is_dir(&self) -> bool {
@@ -137,7 +182,91 @@ impl FileCommon for ApfsFileRecord {
             "mode": self.inode.mode,
             "size": self.size(),
             "inode": self.inode,
+            "xattrs": self.xattrs.iter().map(xattr_metadata_json).collect::<Vec<_>>(),
         })
+    }
+}
+
+fn xattr_metadata_json(record: &XattrRecord) -> Value {
+    let storage = match &record.storage {
+        XattrStorage::Embedded { data } => json!({
+            "kind": "embedded",
+            "size": data.len(),
+            "preview": xattr_preview(data),
+        }),
+        XattrStorage::DataStream {
+            xattr_obj_id,
+            dstream,
+        } => json!({
+            "kind": "data_stream",
+            "object_id": xattr_obj_id,
+            "size": dstream.size,
+            "allocated_size": dstream.alloced_size,
+            "crypto_id": dstream.default_crypto_id,
+        }),
+        XattrStorage::Unknown { data } => json!({
+            "kind": "unknown",
+            "size": data.len(),
+            "preview": xattr_preview(data),
+        }),
+    };
+
+    let decmpfs = if record.name == "com.apple.decmpfs" {
+        record.embedded_data().and_then(|data| {
+            decmpfs::parse_header(data, DecodeLimits::default())
+                .ok()
+                .map(|header| {
+                    let algorithm = match header.compression.algorithm {
+                        Algorithm::Uncompressed => "uncompressed",
+                        Algorithm::Zlib => "zlib",
+                        Algorithm::Lzvn => "lzvn",
+                        Algorithm::Lzfse => "lzfse",
+                    };
+                    let storage = match header.compression.storage {
+                        DecmpfsStorage::Inline => "inline",
+                        DecmpfsStorage::ResourceFork => "resource_fork",
+                    };
+                    json!({
+                        "compression_type": header.compression.raw_type,
+                        "algorithm": algorithm,
+                        "storage": storage,
+                        "uncompressed_size": header.uncompressed_size,
+                    })
+                })
+        })
+    } else {
+        None
+    };
+
+    json!({
+        "name": record.name,
+        "flags": format!("0x{:04x}", record.flags),
+        "declared_data_len": record.declared_data_len,
+        "storage": storage,
+        "decmpfs": decmpfs,
+    })
+}
+
+fn xattr_preview(data: &[u8]) -> Value {
+    const PREVIEW_BYTES: usize = 256;
+    let preview = &data[..data.len().min(PREVIEW_BYTES)];
+    match std::str::from_utf8(preview) {
+        Ok(text)
+            if text
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t')) =>
+        {
+            json!({
+                "encoding": "utf8",
+                "value": text,
+                "truncated": preview.len() < data.len(),
+            })
+        }
+        _ => json!({
+            "encoding": "hex",
+            "value": hex::encode(preview),
+            "truncated": preview.len() < data.len(),
+        }),
     }
 }
 
@@ -261,21 +390,35 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
             };
 
         self.ensure_fstree(fs_index)?;
-        let fst = self.cached_trees.get(&fs_index).unwrap();
-        if let Some(inode) = fst.inode_by_id(&mut self.apfs, inode_query)? {
+        let inode = {
+            let fst = self.cached_trees.get(&fs_index).unwrap();
+            fst.inode_by_id(&mut self.apfs, inode_query)?
+        };
+        if let Some(inode) = inode {
+            let xattrs = self.load_xattrs(fs_index, inode_query, inode.private_id)?;
             return Ok(ApfsFileRecord {
                 fs_index,
                 inode_id: inode_query,
                 inode,
+                xattrs,
             });
         }
-        if let Some(inode_id) = fst.inode_id_by_private_id(&mut self.apfs, inode_query)?
-            && let Some(inode) = fst.inode_by_id(&mut self.apfs, inode_id)?
-        {
+        let resolved = {
+            let fst = self.cached_trees.get(&fs_index).unwrap();
+            if let Some(inode_id) = fst.inode_id_by_private_id(&mut self.apfs, inode_query)? {
+                fst.inode_by_id(&mut self.apfs, inode_id)?
+                    .map(|inode| (inode_id, inode))
+            } else {
+                None
+            }
+        };
+        if let Some((inode_id, inode)) = resolved {
+            let xattrs = self.load_xattrs(fs_index, inode_id, inode.private_id)?;
             return Ok(ApfsFileRecord {
                 fs_index,
                 inode_id,
                 inode,
+                xattrs,
             });
         }
         Err(format!(
@@ -286,6 +429,9 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
     }
 
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>> {
+        if let Some(decoded) = self.read_decompressed_file(file)? {
+            return Ok(decoded);
+        }
         self.ensure_fstree(file.fs_index)?;
         let size = {
             let fst = self.cached_trees.get(&file.fs_index).unwrap();
@@ -307,6 +453,12 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         file: &Self::FileType,
         length: usize,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(decoded) = self.read_decompressed_file(file)? {
+            return Ok(decoded[..decoded.len().min(length)].to_vec());
+        }
         self.ensure_fstree(file.fs_index)?;
         let size = {
             let fst = self.cached_trees.get(&file.fs_index).unwrap();
@@ -322,6 +474,16 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(decoded) = self.read_decompressed_file(file)? {
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(decoded.len());
+            let end = start.saturating_add(length).min(decoded.len());
+            return Ok(decoded[start..end].to_vec());
+        }
         self.ensure_fstree(file.fs_index)?;
         let size = {
             let fst = self.cached_trees.get(&file.fs_index).unwrap();
@@ -393,7 +555,11 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         self.root_inode_id
     }
 
-    fn get_file_by_path(&mut self, path: &str, _file_id: u64) -> Result<Self::FileType, Box<dyn Error>> {
+    fn get_file_by_path(
+        &mut self,
+        path: &str,
+        _file_id: u64,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
         let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
         if components.is_empty() {
             return Err("empty path".into());
@@ -402,7 +568,8 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         // First component is "volume_N" → extract fs_index
         let vol_component = components.remove(0);
         let fs_index: u32 = if let Some(n) = vol_component.strip_prefix("volume_") {
-            n.parse().map_err(|_| format!("invalid volume component: {}", vol_component))?
+            n.parse()
+                .map_err(|_| format!("invalid volume component: {}", vol_component))?
         } else {
             return Err(format!("expected volume_N prefix, got: {}", vol_component).into());
         };
@@ -422,7 +589,13 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
                 .ok_or_else(|| format!("root inode {} not found", root_inode_id))?
         };
 
-        let mut current = ApfsFileRecord { fs_index, inode_id: root_inode_id, inode: root_inode };
+        let root_xattrs = self.load_xattrs(fs_index, root_inode_id, root_inode.private_id)?;
+        let mut current = ApfsFileRecord {
+            fs_index,
+            inode_id: root_inode_id,
+            inode: root_inode,
+            xattrs: root_xattrs,
+        };
 
         for component in components {
             let entries = self.list_dir(&current)?;
@@ -437,7 +610,13 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
                 fst.inode_by_id(&mut self.apfs, entry.inode_id)?
                     .ok_or_else(|| format!("inode {} not found", entry.inode_id))?
             };
-            current = ApfsFileRecord { fs_index, inode_id: entry.inode_id, inode };
+            let xattrs = self.load_xattrs(fs_index, entry.inode_id, inode.private_id)?;
+            current = ApfsFileRecord {
+                fs_index,
+                inode_id: entry.inode_id,
+                inode,
+                xattrs,
+            };
         }
 
         Ok(current)
@@ -459,7 +638,7 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
             )));
 
             // Linear B-Tree scan to load all records into memory at once
-            let (inodes, drecs) = fst.scan_all_records(
+            let (inodes, drecs, mut xattrs) = fst.scan_all_records_with_xattrs(
                 &mut self.apfs,
                 Some(&mut |count| {
                     callback(crate::filesystem::WalkEvent::Status(format!(
@@ -488,10 +667,16 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
                     None => continue,
                 };
 
+                let inode_xattrs = xattrs.remove(&inode_id).or_else(|| {
+                    (inode.private_id != 0 && inode.private_id != inode_id)
+                        .then(|| xattrs.remove(&inode.private_id))
+                        .flatten()
+                });
                 let rec = ApfsFileRecord {
                     fs_index: vol.fs_index,
                     inode_id,
                     inode,
+                    xattrs: inode_xattrs.unwrap_or_default(),
                 };
                 let packed_id = pack_identifier(vol.fs_index, inode_id);
                 callback(crate::filesystem::WalkEvent::File(
@@ -521,6 +706,46 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
 }
 
 impl<T: Read + Seek> ApfsFs<T> {
+    /// Returns decoded AppleFSCompression content when the file carries a
+    /// `com.apple.decmpfs` xattr. A file marked compressed without the xattr is
+    /// an error: silently returning sparse zeroes would corrupt forensic output.
+    fn read_decompressed_file(
+        &mut self,
+        file: &ApfsFileRecord,
+    ) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+        let Some(decmpfs_xattr) = self.read_xattr(file, "com.apple.decmpfs")? else {
+            if file.inode.is_compressed() {
+                return Err(format!(
+                    "APFS inode {} is marked compressed but com.apple.decmpfs is missing",
+                    file.inode_id
+                )
+                .into());
+            }
+            return Ok(None);
+        };
+
+        let header =
+            decmpfs::parse_header(&decmpfs_xattr, DecodeLimits::default()).map_err(|error| {
+                format!(
+                    "failed to parse decmpfs header for APFS inode {}: {}",
+                    file.inode_id, error
+                )
+            })?;
+        let resource_fork = if header.compression.storage == DecmpfsStorage::ResourceFork {
+            self.read_xattr(file, "com.apple.ResourceFork")?
+        } else {
+            None
+        };
+        let decoded = decmpfs::decompress_decmpfs(&decmpfs_xattr, resource_fork.as_deref())
+            .map_err(|error| {
+                format!(
+                    "failed to decode APFS-compressed inode {}: {}",
+                    file.inode_id, error
+                )
+            })?;
+        Ok(Some(decoded))
+    }
+
     fn read_file_slice_with_size(
         &mut self,
         file: &ApfsFileRecord,
@@ -650,5 +875,69 @@ fn unpack_identifier(file_id: u64) -> Option<(u32, u64)> {
         Some((fs_index, inode_id))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inode_with_sizes(uncompressed_size: u64, stream_size: u64) -> InodeVal {
+        InodeVal {
+            parent_id: 2,
+            private_id: 3,
+            create_time: 0,
+            mod_time: 0,
+            change_time: 0,
+            access_time: 0,
+            internal_flags: INODE_HAS_UNCOMPRESSED_SIZE,
+            nchildren_or_nlink: 1,
+            default_protection_class: 0,
+            write_gen_counter: 0,
+            bsd_flags: exhume_apfs::BSD_UF_COMPRESSED,
+            owner: 0,
+            group: 0,
+            mode: 0o100644,
+            uncompressed_size,
+            dstream: Some(exhume_apfs::JDStream {
+                size: stream_size,
+                alloced_size: stream_size,
+                default_crypto_id: 0,
+                total_bytes_written: stream_size,
+                total_bytes_read: 0,
+            }),
+            xfields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn compressed_record_reports_uncompressed_size() {
+        let record = ApfsFileRecord {
+            fs_index: 0,
+            inode_id: 3,
+            inode: inode_with_sizes(643, 445),
+            xattrs: Vec::new(),
+        };
+        assert_eq!(record.size(), 643);
+    }
+
+    #[test]
+    fn xattr_metadata_identifies_decmpfs_header() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&decmpfs::MAGIC.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(&643u64.to_le_bytes());
+        let metadata = xattr_metadata_json(&XattrRecord {
+            owner_id: 3,
+            name: "com.apple.decmpfs".to_string(),
+            flags: exhume_apfs::XATTR_DATA_EMBEDDED,
+            declared_data_len: data.len() as u16,
+            storage: XattrStorage::Embedded { data },
+        });
+
+        assert_eq!(metadata["decmpfs"]["compression_type"], 8);
+        assert_eq!(metadata["decmpfs"]["algorithm"], "lzvn");
+        assert_eq!(metadata["decmpfs"]["storage"], "resource_fork");
+        assert_eq!(metadata["decmpfs"]["uncompressed_size"], 643);
     }
 }
