@@ -3,10 +3,81 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
 use std::error::Error;
+use std::fmt;
 use std::fs::File as StdFile;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 const CACHE_SIZE: usize = 64 * 1024; // 64 KiB cache;
+
+/// Normalized kind of an on-disk filesystem entry.
+///
+/// Exporters must use this value rather than the presentation-oriented
+/// [`File::ftype`] string, whose spelling predates this common abstraction and
+/// varies between filesystem implementations.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    Regular,
+    Directory,
+    Symlink,
+    Special,
+}
+
+/// Sanitized view actually used to expose filesystem bytes. This records an
+/// applied transform, never credentials or merely supplied key material.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemSourceView {
+    Native,
+    BitlockerDecrypted,
+}
+
+impl FilesystemSourceView {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::BitlockerDecrypted => "bitlocker_decrypted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryEntryLimitError {
+    pub maximum: usize,
+}
+
+impl fmt::Display for DirectoryEntryLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "directory contains more than {} exportable entries",
+            self.maximum
+        )
+    }
+}
+
+impl Error for DirectoryEntryLimitError {}
+
+/// Stable identity used for directory-cycle detection and hard-link
+/// provenance. `namespace` distinguishes volumes/devices, while `generation`
+/// protects filesystems such as NTFS from stale reused record numbers.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    pub namespace: u64,
+    pub identifier: u64,
+    pub generation: u64,
+}
+
+impl FileIdentity {
+    pub const fn new(namespace: u64, identifier: u64, generation: u64) -> Self {
+        Self {
+            namespace,
+            identifier,
+            generation,
+        }
+    }
+}
 
 /// A trait for common file record functionality.
 pub trait FileCommon {
@@ -16,6 +87,18 @@ pub trait FileCommon {
     fn size(&self) -> u64;
     /// Returns true if the record represents a directory.
     fn is_dir(&self) -> bool;
+    /// Return the normalized kind of the entry.
+    ///
+    /// The default preserves compatibility for third-party filesystem
+    /// implementations. Implementors should override it when they can
+    /// distinguish symbolic links or special entries.
+    fn entry_kind(&self) -> FileKind {
+        if self.is_dir() {
+            FileKind::Directory
+        } else {
+            FileKind::Regular
+        }
+    }
     /// Return the string representation of a File
     fn to_string(&self) -> String;
     /// Return the json representation of a File
@@ -72,20 +155,57 @@ pub trait Filesystem {
     type DirectoryType: DirectoryCommon;
 
     fn filesystem_type(&self) -> String;
+    /// Return the sanitized source view that was actually opened.
+    fn source_view(&self) -> FilesystemSourceView {
+        FilesystemSourceView::Native
+    }
     fn path_separator(&self) -> String;
     fn record_count(&mut self) -> u64;
     fn block_size(&self) -> u64;
     fn get_metadata(&self) -> Result<Value, Box<dyn Error>>;
     fn get_metadata_pretty(&self) -> Result<String, Box<dyn Error>>;
     fn get_file(&mut self, file_id: u64) -> Result<Self::FileType, Box<dyn Error>>;
+    /// Resolve a concrete directory-entry occurrence beneath `parent`.
+    ///
+    /// The hook carries context that a bare identifier cannot represent on
+    /// multi-volume or host-folder filesystems. The default remains suitable
+    /// for traditional inode-based filesystems.
+    fn resolve_child(
+        &mut self,
+        _parent: &Self::FileType,
+        entry: &Self::DirectoryType,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
+        self.get_file(entry.file_id())
+    }
+
+    /// Identifier to publish for a concrete child occurrence.
+    fn entry_identifier(&self, _parent: &Self::FileType, entry: &Self::DirectoryType) -> u64 {
+        entry.file_id()
+    }
+
+    /// Stable identity for cycle detection and hard-link provenance.
+    fn file_identity(&self, file: &Self::FileType) -> FileIdentity {
+        FileIdentity::new(0, file.id(), 0)
+    }
+
+    /// Canonical public identifier for an already-resolved record.
+    fn file_identifier(&self, file: &Self::FileType) -> u64 {
+        file.id()
+    }
+
+    /// Host root that must remain read-only while exporting Folder evidence.
+    fn protected_host_root(&self) -> Option<&Path> {
+        None
+    }
     fn get_file_by_path(
         &mut self,
         path: &str,
         _file_id: u64,
     ) -> Result<Self::FileType, Box<dyn Error>> {
+        let separator = self.path_separator();
         let components: Vec<&str> = path
-            .split(['/', '\\'])
-            .filter(|c| !c.is_empty())
+            .split(separator.as_str())
+            .filter(|component| !component.is_empty())
             .collect();
         let root_id = self.get_root_file_id();
         let mut current = self.get_file(root_id)?;
@@ -95,7 +215,7 @@ pub trait Filesystem {
                 .into_iter()
                 .find(|e| e.name() == *component)
                 .ok_or_else(|| format!("path component not found: {:?}", component))?;
-            current = self.get_file(entry.file_id())?;
+            current = self.resolve_child(&current, &entry)?;
         }
         Ok(current)
     }
@@ -116,6 +236,20 @@ pub trait Filesystem {
         &mut self,
         inode: &Self::FileType,
     ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>>;
+    /// Bounded directory listing used by exporters. Backends should override
+    /// this to stop decoding/collecting once `maximum` is exceeded.
+    fn list_dir_limited(
+        &mut self,
+        file: &Self::FileType,
+        maximum: usize,
+    ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>> {
+        let entries = self.list_dir(file)?;
+        if entries.len() > maximum {
+            Err(Box::new(DirectoryEntryLimitError { maximum }))
+        } else {
+            Ok(entries)
+        }
+    }
     fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
     fn get_root_file_id(&self) -> u64;
 

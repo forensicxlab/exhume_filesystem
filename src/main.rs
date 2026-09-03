@@ -1,3 +1,5 @@
+mod export_cli;
+
 use clap::*;
 use clap_num::maybe_hex;
 use exhume_body::Body;
@@ -9,9 +11,10 @@ use exhume_filesystem::folder_impl::FolderFS;
 use log::{debug, error, info};
 use serde_json::{Value, json};
 use std::path::Path;
+use zeroize::Zeroize;
 
 fn main() {
-    let matches = Command::new("exhume_filesystem")
+    let mut matches = Command::new("exhume_filesystem")
         .version(crate_version!())
         .author(crate_authors!())
         .about("Exhume in a standardized and normalized way files & directories from a given filesystem.")
@@ -59,7 +62,7 @@ fn main() {
             Arg::new("fvek")
                 .long("fvek")
                 .value_parser(value_parser!(String))
-                .help("Full Volume Encryption Key (FVEK) for BitLocker, in hex format"),
+                .help("DEPRECATED: BitLocker FVEK in process arguments; prefer export-volume --fvek-file or --fvek-stdin"),
         )
         .arg(
             Arg::new("enum")
@@ -111,10 +114,13 @@ fn main() {
             Arg::new("log_level")
                 .short('l')
                 .long("log-level")
+                .global(true)
                 .value_parser(["error", "warn", "info", "debug", "trace"])
                 .default_value("info")
                 .help("Set the log verbosity level"),
         )
+        .subcommand(export_cli::command())
+        .subcommand_negates_reqs(true)
         .get_matches();
 
     // Initialize logger.
@@ -128,6 +134,41 @@ fn main() {
         _ => log::LevelFilter::Info,
     };
     env_logger::Builder::new().filter_level(level_filter).init();
+
+    if let Some(("export-volume", export_matches)) = matches.subcommand() {
+        let arguments = match export_cli::parse(export_matches) {
+            Ok(arguments) => arguments,
+            Err(message) => {
+                error!("Invalid export-volume arguments: {message}");
+                std::process::exit(2);
+            }
+        };
+        if let Err(message) = export_cli::run(arguments) {
+            error!("{message}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let mut keys = None;
+    if let Some(mut fvek_hex) = matches.remove_one::<String>("fvek") {
+        eprintln!(
+            "SECURITY WARNING: top-level --fvek is deprecated because command-line arguments may be exposed in process listings and shell history. Prefer export-volume --fvek-file or piped --fvek-stdin."
+        );
+        let decoded = hex::decode(&fvek_hex);
+        fvek_hex.zeroize();
+        match decoded {
+            Ok(fvek_bytes) => {
+                keys = Some(KeyMaterial {
+                    bitlocker_fvek: Some(fvek_bytes),
+                });
+            }
+            Err(_) => {
+                error!("Provided FVEK is not a valid hex string.");
+                return;
+            }
+        }
+    }
 
     let file_path = matches.get_one::<String>("body").unwrap();
     let auto = String::from("auto");
@@ -156,18 +197,6 @@ fn main() {
     let print = matches.get_flag("print");
     let dump = matches.get_flag("dump");
     let json_output = matches.get_flag("json");
-
-    let mut keys = None;
-    if let Some(fvek_hex) = matches.get_one::<String>("fvek") {
-        if let Ok(fvek_bytes) = hex::decode(fvek_hex) {
-            keys = Some(KeyMaterial {
-                bitlocker_fvek: Some(fvek_bytes),
-            });
-        } else {
-            error!("Provided FVEK is not a valid hex string.");
-            return;
-        }
-    }
 
     let mut filesystem: DetectedFs<exhume_filesystem::detected_fs::ImageStream> = if is_directory {
         let fs = FolderFS::new(path.to_path_buf());

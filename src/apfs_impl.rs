@@ -1,5 +1,5 @@
 use crate::decmpfs::{self, Algorithm, DecodeLimits, Storage as DecmpfsStorage};
-use crate::filesystem::{DirectoryCommon, File, FileCommon, Filesystem};
+use crate::filesystem::{DirectoryCommon, File, FileCommon, FileIdentity, FileKind, Filesystem};
 use exhume_apfs::{
     APFS, ApfsVolumeSuperblock, DirEntry, FsTree, INODE_HAS_UNCOMPRESSED_SIZE, InodeVal,
     XattrRecord, XattrStorage, apfs_kind, is_dir_mode,
@@ -169,6 +169,15 @@ impl FileCommon for ApfsFileRecord {
 
     fn is_dir(&self) -> bool {
         is_dir_mode(self.inode.mode)
+    }
+
+    fn entry_kind(&self) -> FileKind {
+        match self.inode.mode & 0o170000 {
+            0o040000 => FileKind::Directory,
+            0o100000 => FileKind::Regular,
+            0o120000 => FileKind::Symlink,
+            _ => FileKind::Special,
+        }
     }
 
     fn to_string(&self) -> String {
@@ -426,6 +435,33 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
             inode_query, fs_index
         )
         .into())
+    }
+
+    fn resolve_child(
+        &mut self,
+        parent: &Self::FileType,
+        entry: &Self::DirectoryType,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
+        if entry.fs_index != parent.fs_index {
+            return Err(format!(
+                "APFS directory entry volume {} does not match parent volume {}",
+                entry.fs_index, parent.fs_index
+            )
+            .into());
+        }
+        self.get_file(pack_identifier(entry.fs_index, entry.inode_id))
+    }
+
+    fn entry_identifier(&self, _parent: &Self::FileType, entry: &Self::DirectoryType) -> u64 {
+        pack_identifier(entry.fs_index, entry.inode_id)
+    }
+
+    fn file_identity(&self, file: &Self::FileType) -> FileIdentity {
+        FileIdentity::new(u64::from(file.fs_index), file.inode_id, 0)
+    }
+
+    fn file_identifier(&self, file: &Self::FileType) -> u64 {
+        pack_identifier(file.fs_index, file.inode_id)
     }
 
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -881,6 +917,13 @@ fn unpack_identifier(file_id: u64) -> Option<(u32, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_identifier_preserves_non_default_volume_namespace() {
+        let packed = pack_identifier(3, 42);
+        assert_ne!(packed, 42);
+        assert_eq!(unpack_identifier(packed), Some((3, 42)));
+    }
 
     fn inode_with_sizes(uncompressed_size: u64, stream_size: u64) -> InodeVal {
         InodeVal {

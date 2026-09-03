@@ -1,20 +1,46 @@
 use crate::apfs_impl::ApfsFs;
-use crate::filesystem::{DirectoryCommon, File, FileCommon, Filesystem};
+use crate::filesystem::{
+    DirectoryCommon, File, FileCommon, FileIdentity, FileKind, Filesystem, FilesystemSourceView,
+};
 use crate::folder_impl::FolderFS;
 use exhume_apfs::APFS;
-use exhume_body::{Body, BodySlice};
+use exhume_body::{Body, BodySlice, VolumeReader};
 use exhume_exfat::ExFatFS;
 use exhume_extfs::ExtFS;
 use exhume_ntfs::NTFS;
-use exhume_ntfs::bitlocker::BitLockerStream;
+use exhume_ntfs::bitlocker::{BitLockerStream, BitLockerVolumeOptions};
 use log::info;
 use serde_json::Value;
+use std::any::Any;
 use std::error::Error;
+use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::Path;
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct KeyMaterial {
     pub bitlocker_fvek: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for KeyMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KeyMaterial")
+            .field(
+                "bitlocker_fvek",
+                &self.bitlocker_fvek.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl Drop for KeyMaterial {
+    fn drop(&mut self) {
+        if let Some(fvek) = self.bitlocker_fvek.as_mut() {
+            fvek.zeroize();
+        }
+    }
 }
 
 pub enum ImageStream {
@@ -36,6 +62,31 @@ impl Seek for ImageStream {
         match self {
             ImageStream::Raw(slice) => slice.seek(pos),
             ImageStream::BitLocker(bl) => bl.seek(pos),
+        }
+    }
+}
+
+impl VolumeReader for ImageStream {
+    fn volume_len(&self) -> u64 {
+        match self {
+            ImageStream::Raw(slice) => slice.len(),
+            ImageStream::BitLocker(bitlocker) => bitlocker.len(),
+        }
+    }
+
+    fn sector_size(&self) -> u32 {
+        match self {
+            ImageStream::Raw(slice) => slice.sector_size(),
+            ImageStream::BitLocker(bitlocker) => bitlocker.sector_size(),
+        }
+    }
+}
+
+impl ImageStream {
+    pub const fn source_view(&self) -> FilesystemSourceView {
+        match self {
+            Self::Raw(_) => FilesystemSourceView::Native,
+            Self::BitLocker(_) => FilesystemSourceView::BitlockerDecrypted,
         }
     }
 }
@@ -91,6 +142,15 @@ impl FileCommon for DetectedFile {
             DetectedFile::Exfat(inode) => inode.is_dir(),
             DetectedFile::Apfs(inode) => inode.is_dir(),
             DetectedFile::Folder(file) => file.is_dir(),
+        }
+    }
+    fn entry_kind(&self) -> FileKind {
+        match self {
+            DetectedFile::Ext(inode) => inode.entry_kind(),
+            DetectedFile::Ntfs(record) => record.entry_kind(),
+            DetectedFile::Exfat(inode) => inode.entry_kind(),
+            DetectedFile::Apfs(inode) => inode.entry_kind(),
+            DetectedFile::Folder(file) => file.entry_kind(),
         }
     }
     fn to_string(&self) -> String {
@@ -152,7 +212,7 @@ impl DirectoryCommon for DetectedDir {
     }
 }
 
-impl<T: Read + Seek> Filesystem for DetectedFs<T> {
+impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
     type FileType = DetectedFile;
     type DirectoryType = DetectedDir;
 
@@ -163,6 +223,15 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Exfat(fs) => fs.filesystem_type(),
             DetectedFs::Apfs(fs) => fs.filesystem_type(),
             DetectedFs::Folder(fs) => fs.filesystem_type(),
+        }
+    }
+    fn source_view(&self) -> FilesystemSourceView {
+        match self {
+            DetectedFs::Ntfs(fs) => (&fs.body as &dyn Any)
+                .downcast_ref::<ImageStream>()
+                .map(ImageStream::source_view)
+                .unwrap_or(FilesystemSourceView::Native),
+            _ => FilesystemSourceView::Native,
         }
     }
     fn path_separator(&self) -> String {
@@ -217,6 +286,76 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
             DetectedFs::Exfat(fs) => fs.get_file(file_id).map(DetectedFile::Exfat),
             DetectedFs::Apfs(fs) => fs.get_file(file_id).map(DetectedFile::Apfs),
             DetectedFs::Folder(fs) => fs.get_file(file_id).map(DetectedFile::Folder),
+        }
+    }
+    fn resolve_child(
+        &mut self,
+        parent: &Self::FileType,
+        entry: &Self::DirectoryType,
+    ) -> Result<Self::FileType, Box<dyn Error>> {
+        match (self, parent, entry) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(parent), DetectedDir::Ext(entry)) => {
+                fs.resolve_child(parent, entry).map(DetectedFile::Ext)
+            }
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(parent), DetectedDir::Ntfs(entry)) => {
+                fs.resolve_child(parent, entry).map(DetectedFile::Ntfs)
+            }
+            (DetectedFs::Exfat(fs), DetectedFile::Exfat(parent), DetectedDir::Exfat(entry)) => {
+                fs.resolve_child(parent, entry).map(DetectedFile::Exfat)
+            }
+            (DetectedFs::Apfs(fs), DetectedFile::Apfs(parent), DetectedDir::Apfs(entry)) => {
+                fs.resolve_child(parent, entry).map(DetectedFile::Apfs)
+            }
+            (DetectedFs::Folder(fs), DetectedFile::Folder(parent), DetectedDir::Folder(entry)) => {
+                fs.resolve_child(parent, entry).map(DetectedFile::Folder)
+            }
+            _ => Err("filesystem / directory-entry variant mismatch".into()),
+        }
+    }
+    fn entry_identifier(&self, parent: &Self::FileType, entry: &Self::DirectoryType) -> u64 {
+        match (self, parent, entry) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(parent), DetectedDir::Ext(entry)) => {
+                fs.entry_identifier(parent, entry)
+            }
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(parent), DetectedDir::Ntfs(entry)) => {
+                fs.entry_identifier(parent, entry)
+            }
+            (DetectedFs::Exfat(fs), DetectedFile::Exfat(parent), DetectedDir::Exfat(entry)) => {
+                fs.entry_identifier(parent, entry)
+            }
+            (DetectedFs::Apfs(fs), DetectedFile::Apfs(parent), DetectedDir::Apfs(entry)) => {
+                fs.entry_identifier(parent, entry)
+            }
+            (DetectedFs::Folder(fs), DetectedFile::Folder(parent), DetectedDir::Folder(entry)) => {
+                fs.entry_identifier(parent, entry)
+            }
+            _ => entry.file_id(),
+        }
+    }
+    fn file_identity(&self, file: &Self::FileType) -> FileIdentity {
+        match (self, file) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(file)) => fs.file_identity(file),
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(file)) => fs.file_identity(file),
+            (DetectedFs::Exfat(fs), DetectedFile::Exfat(file)) => fs.file_identity(file),
+            (DetectedFs::Apfs(fs), DetectedFile::Apfs(file)) => fs.file_identity(file),
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.file_identity(file),
+            _ => FileIdentity::new(0, file.id(), 0),
+        }
+    }
+    fn file_identifier(&self, file: &Self::FileType) -> u64 {
+        match (self, file) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(file)) => fs.file_identifier(file),
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(file)) => fs.file_identifier(file),
+            (DetectedFs::Exfat(fs), DetectedFile::Exfat(file)) => fs.file_identifier(file),
+            (DetectedFs::Apfs(fs), DetectedFile::Apfs(file)) => fs.file_identifier(file),
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.file_identifier(file),
+            _ => file.id(),
+        }
+    }
+    fn protected_host_root(&self) -> Option<&Path> {
+        match self {
+            DetectedFs::Folder(fs) => fs.protected_host_root(),
+            _ => None,
         }
     }
     fn get_file_by_path(
@@ -307,6 +446,36 @@ impl<T: Read + Seek> Filesystem for DetectedFs<T> {
         }
     }
 
+    fn list_dir_limited(
+        &mut self,
+        file: &Self::FileType,
+        maximum: usize,
+    ) -> Result<Vec<Self::DirectoryType>, Box<dyn Error>> {
+        match (self, file) {
+            (DetectedFs::Ext(fs), DetectedFile::Ext(inode)) => {
+                Filesystem::list_dir_limited(fs, inode, maximum)
+                    .map(|entries| entries.into_iter().map(DetectedDir::Ext).collect())
+            }
+            (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(record)) => {
+                Filesystem::list_dir_limited(fs, record, maximum)
+                    .map(|entries| entries.into_iter().map(DetectedDir::Ntfs).collect())
+            }
+            (DetectedFs::Exfat(fs), DetectedFile::Exfat(inode)) => {
+                Filesystem::list_dir_limited(fs, inode, maximum)
+                    .map(|entries| entries.into_iter().map(DetectedDir::Exfat).collect())
+            }
+            (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => {
+                Filesystem::list_dir_limited(fs, inode, maximum)
+                    .map(|entries| entries.into_iter().map(DetectedDir::Apfs).collect())
+            }
+            (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
+                Filesystem::list_dir_limited(fs, file, maximum)
+                    .map(|entries| entries.into_iter().map(DetectedDir::Folder).collect())
+            }
+            _ => Err("filesystem / record variant mismatch".into()),
+        }
+    }
+
     fn get_root_file_id(&self) -> u64 {
         match self {
             DetectedFs::Ext(fs) => fs.get_root_file_id(),
@@ -388,12 +557,21 @@ pub fn detect_filesystem(
         }
         Err(e) if e.to_string().contains("-FVE-FS-") => {
             if let Some(mut km) = keys {
-                if let Some(fvek) = km.bitlocker_fvek.take() {
+                if let Some(mut fvek) = km.bitlocker_fvek.take() {
                     info!("BitLocker detected. Attempting to decrypt with provided FVEK...");
                     let partition_for_bl = BodySlice::new(body, offset, partition_size)
                         .map_err(|e| format!("Could not create BodySlice for BL: {e}"))?;
 
-                    match BitLockerStream::new(partition_for_bl, &fvek, 512) {
+                    let options = BitLockerVolumeOptions::new(
+                        partition_size,
+                        u64::from(body.get_sector_size()),
+                    )
+                    .with_partition_offset_bytes(offset);
+                    let opened =
+                        BitLockerStream::new_with_options(partition_for_bl, &fvek, options);
+                    fvek.zeroize();
+
+                    match opened {
                         Ok(bl_stream) => match NTFS::new(ImageStream::BitLocker(bl_stream)) {
                             Ok(ntfs) => {
                                 info!("Successfully detected BitLocker-decrypted NT filesystem.");

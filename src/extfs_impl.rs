@@ -1,4 +1,4 @@
-use crate::filesystem::{DirectoryCommon, FileCommon};
+use crate::filesystem::{DirectoryCommon, FileCommon, FileKind};
 use crate::filesystem::{File, Filesystem};
 use exhume_extfs::ExtFS;
 use exhume_extfs::direntry::DirEntry;
@@ -19,6 +19,18 @@ impl FileCommon for Inode {
     }
     fn is_dir(&self) -> bool {
         self.is_dir()
+    }
+
+    fn entry_kind(&self) -> FileKind {
+        if self.is_dir() {
+            FileKind::Directory
+        } else if self.is_regular_file() {
+            FileKind::Regular
+        } else if self.is_symlink() {
+            FileKind::Symlink
+        } else {
+            FileKind::Special
+        }
     }
 
     fn to_string(&self) -> String {
