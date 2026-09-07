@@ -5,9 +5,125 @@ use serde_json::{Value, json};
 use std::error::Error;
 use std::fs::{self, File as StdFile, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HostFileIdentity {
+    device: u64,
+    file_id: u64,
+}
+
+#[cfg(unix)]
+fn inspect_path(path: &Path) -> Result<(Metadata, HostFileIdentity), Box<dyn Error>> {
+    let metadata = fs::symlink_metadata(path)?;
+    let identity = HostFileIdentity {
+        device: metadata.dev(),
+        file_id: metadata.ino(),
+    };
+    Ok((metadata, identity))
+}
+
+#[cfg(windows)]
+fn inspect_path(path: &Path) -> Result<(Metadata, HostFileIdentity), Box<dyn Error>> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    // Query the directory entry itself with no data access. Opening reparse
+    // points rather than their targets keeps FolderFS inside the evidence root.
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let opened = options.open(path)?;
+    inspect_open_file(&opened)
+}
+
+#[cfg(unix)]
+fn inspect_open_file(file: &StdFile) -> Result<(Metadata, HostFileIdentity), Box<dyn Error>> {
+    let metadata = file.metadata()?;
+    let identity = HostFileIdentity {
+        device: metadata.dev(),
+        file_id: metadata.ino(),
+    };
+    Ok((metadata, identity))
+}
+
+#[cfg(windows)]
+fn inspect_open_file(file: &StdFile) -> Result<(Metadata, HostFileIdentity), Box<dyn Error>> {
+    let metadata = file.metadata()?;
+    let information = winapi_util::file::information(file)?;
+    let identity = HostFileIdentity {
+        device: information.volume_serial_number(),
+        file_id: information.file_index(),
+    };
+    Ok((metadata, identity))
+}
+
+#[cfg(unix)]
+fn open_regular_no_follow(path: &Path) -> Result<StdFile, Box<dyn Error>> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?)
+}
+
+#[cfg(windows)]
+fn open_regular_no_follow(path: &Path) -> Result<StdFile, Box<dyn Error>> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?)
+}
+
+#[cfg(unix)]
+fn host_ownership_and_permissions(metadata: &Metadata) -> (u32, u32, u32) {
+    (metadata.mode(), metadata.uid(), metadata.gid())
+}
+
+#[cfg(windows)]
+fn host_ownership_and_permissions(_metadata: &Metadata) -> (u32, u32, u32) {
+    // Windows access is governed by ACLs, which cannot be represented by the
+    // POSIX mode/UID/GID fields exposed by the current normalized File model.
+    (0, 0, 0)
+}
+
+#[cfg(unix)]
+fn normalized_permissions(file: &FolderFile) -> Option<String> {
+    Some(format!("{:o}", file.permissions))
+}
+
+#[cfg(windows)]
+fn normalized_permissions(_file: &FolderFile) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn normalized_owner(file: &FolderFile) -> Option<String> {
+    Some(file.uid.to_string())
+}
+
+#[cfg(windows)]
+fn normalized_owner(_file: &FolderFile) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn normalized_group(file: &FolderFile) -> Option<String> {
+    Some(file.gid.to_string())
+}
+
+#[cfg(windows)]
+fn normalized_group(_file: &FolderFile) -> Option<String> {
+    None
+}
 
 #[derive(Debug, Clone)]
 pub struct FolderFile {
@@ -106,8 +222,8 @@ impl FolderFS {
             path_cache: HashMap::new(),
         };
         // Prime the cache with the root
-        if let Ok(meta) = fs::symlink_metadata(&root_path) {
-            fs.path_cache.insert(meta.ino(), root_path);
+        if let Ok((_, identity)) = inspect_path(&root_path) {
+            fs.path_cache.insert(identity.file_id, root_path);
         }
         fs
     }
@@ -167,13 +283,12 @@ impl FolderFS {
         expected_id: u64,
     ) -> Result<FolderFile, Box<dyn Error>> {
         self.ensure_parent_contained(path)?;
-        let metadata = fs::symlink_metadata(path)?;
-        let actual_id = metadata.ino();
-        if expected_id != 0 && expected_id != actual_id {
+        let (metadata, identity) = inspect_path(path)?;
+        if expected_id != 0 && expected_id != identity.file_id {
             return Err(format!(
-                "FolderFS path {} has inode {}, expected {}",
+                "FolderFS path {} has file ID {}, expected {}",
                 path.display(),
-                actual_id,
+                identity.file_id,
                 expected_id
             )
             .into());
@@ -194,10 +309,11 @@ impl FolderFS {
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
+        let (permissions, uid, gid) = host_ownership_and_permissions(&metadata);
 
         Ok(FolderFile {
-            id: actual_id,
-            device: metadata.dev(),
+            id: identity.file_id,
+            device: identity.device,
             path: path.to_path_buf(),
             size: metadata.len(),
             is_dir: metadata.is_dir(),
@@ -205,25 +321,25 @@ impl FolderFS {
             created,
             modified,
             accessed,
-            permissions: metadata.mode(),
-            uid: metadata.uid(),
-            gid: metadata.gid(),
+            permissions,
+            uid,
+            gid,
         })
     }
 
     fn verify_record(&self, file: &FolderFile) -> Result<Metadata, Box<dyn Error>> {
         let root = self.ensure_parent_contained(&file.path)?;
-        let metadata = fs::symlink_metadata(&file.path)?;
+        let (metadata, identity) = inspect_path(&file.path)?;
         let kind = Self::kind_from_metadata(&metadata);
-        if metadata.dev() != file.device || metadata.ino() != file.id || kind != file.kind {
+        if identity.device != file.device || identity.file_id != file.id || kind != file.kind {
             return Err(format!(
-                "FolderFS occurrence changed at {} (expected dev/inode/kind {}/{}/{:?}, found {}/{}/{:?})",
+                "FolderFS occurrence changed at {} (expected device/file ID/kind {}/{}/{:?}, found {}/{}/{:?})",
                 file.path.display(),
                 file.device,
                 file.id,
                 file.kind,
-                metadata.dev(),
-                metadata.ino(),
+                identity.device,
+                identity.file_id,
                 kind
             )
             .into());
@@ -250,12 +366,9 @@ impl FolderFS {
             .into());
         }
         self.ensure_parent_contained(&file.path)?;
-        let opened = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&file.path)?;
-        let metadata = opened.metadata()?;
-        if !metadata.is_file() || metadata.dev() != file.device || metadata.ino() != file.id {
+        let opened = open_regular_no_follow(&file.path)?;
+        let (metadata, identity) = inspect_open_file(&opened)?;
+        if !metadata.is_file() || identity.device != file.device || identity.file_id != file.id {
             return Err(format!(
                 "FolderFS regular-file occurrence changed at {}",
                 file.path.display()
@@ -286,14 +399,13 @@ impl FolderFS {
                 return Err(Box::new(DirectoryEntryLimitError { maximum }));
             }
             let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            let ino = metadata.ino();
             let name = entry.file_name().to_string_lossy().to_string();
             let path = entry.path();
-            self.path_cache.insert(ino, path.clone());
+            let (_, identity) = inspect_path(&path)?;
+            self.path_cache.insert(identity.file_id, path.clone());
             entries.push(FolderDirectory {
-                file_id: ino,
-                device: metadata.dev(),
+                file_id: identity.file_id,
+                device: identity.device,
                 name,
                 path,
             });
@@ -428,24 +540,23 @@ impl Filesystem for FolderFS {
 
         // Inspect, but deliberately do not canonicalize, the final component.
         // A final symlink is a valid evidence entry and must not be followed.
-        let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+        let (_, identity) = inspect_path(&candidate).map_err(|error| {
             format!(
                 "could not inspect FolderFS path {}: {error}",
                 candidate.display()
             )
         })?;
-        let actual_id = metadata.ino();
-        if file_id != 0 && file_id != actual_id {
+        if file_id != 0 && file_id != identity.file_id {
             return Err(format!(
-                "FolderFS path {} has inode {}, expected {}",
+                "FolderFS path {} has file ID {}, expected {}",
                 candidate.display(),
-                actual_id,
+                identity.file_id,
                 file_id
             )
             .into());
         }
-        self.path_cache.insert(actual_id, candidate.clone());
-        self.get_file_from_path(&candidate, actual_id)
+        self.path_cache.insert(identity.file_id, candidate.clone());
+        self.get_file_from_path(&candidate, identity.file_id)
     }
 
     fn read_file_content(&mut self, file: &Self::FileType) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -497,8 +608,8 @@ impl Filesystem for FolderFS {
     }
 
     fn get_root_file_id(&self) -> u64 {
-        fs::symlink_metadata(&self.root_path)
-            .map(|m| m.ino())
+        inspect_path(&self.root_path)
+            .map(|(_, identity)| identity.file_id)
             .unwrap_or(0)
     }
 
@@ -526,14 +637,57 @@ impl Filesystem for FolderFS {
             created: file.created,
             modified: file.modified,
             accessed: file.accessed,
-            permissions: Some(format!("{:o}", file.permissions)),
-            owner: Some(file.uid.to_string()),
-            group: Some(file.gid.to_string()),
+            permissions: normalized_permissions(file),
+            owner: normalized_owner(file),
+            group: normalized_group(file),
             display: None,
             sig_name: None,
             sig_mime: None,
             sig_exts: None,
             metadata: json!({}),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_filesystem_resolves_and_reads_a_child_with_stable_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let child_path = temporary.path().join("evidence.bin");
+        fs::write(&child_path, b"forensic bytes").unwrap();
+
+        let mut filesystem = FolderFS::new(temporary.path().to_path_buf());
+        let root_id = filesystem.get_root_file_id();
+        assert_ne!(root_id, 0);
+
+        let root = filesystem.get_file(root_id).unwrap();
+        let entries = filesystem.list_dir(&root).unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == "evidence.bin")
+            .unwrap();
+        let child = filesystem.resolve_child(&root, entry).unwrap();
+
+        assert_eq!(child.id, entry.file_id);
+        assert_eq!(child.device, entry.device);
+        assert_eq!(
+            filesystem.read_file_content(&child).unwrap(),
+            b"forensic bytes"
+        );
+
+        let normalized = filesystem.record_to_file(&child, child.id, "/evidence.bin");
+        assert_eq!(normalized.name, "evidence.bin");
+        assert_eq!(normalized.size, 14);
+        #[cfg(unix)]
+        assert!(normalized.permissions.is_some());
+        #[cfg(windows)]
+        {
+            assert!(normalized.permissions.is_none());
+            assert!(normalized.owner.is_none());
+            assert!(normalized.group.is_none());
         }
     }
 }
