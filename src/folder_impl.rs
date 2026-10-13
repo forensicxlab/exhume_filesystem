@@ -357,7 +357,8 @@ impl FolderFS {
         Ok(metadata)
     }
 
-    fn open_verified_regular(&self, file: &FolderFile) -> Result<StdFile, Box<dyn Error>> {
+    /// Open an independently positioned, verified handle for sequential readers.
+    pub fn open_verified_regular(&self, file: &FolderFile) -> Result<StdFile, Box<dyn Error>> {
         if file.kind != FileKind::Regular {
             return Err(format!(
                 "FolderFS record is not a regular file: {}",

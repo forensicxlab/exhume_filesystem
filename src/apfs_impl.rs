@@ -4,12 +4,14 @@ use exhume_apfs::{
     APFS, ApfsVolumeSuperblock, DirEntry, FsTree, INODE_HAS_UNCOMPRESSED_SIZE, InodeVal,
     XattrRecord, XattrStorage, apfs_kind, is_dir_mode,
 };
-use log::warn;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+#[path = "apfs_range.rs"]
+mod range;
 
 const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
 const PACKED_INODE_MASK: u64 = 0x00ff_ffff_ffff_ffff;
@@ -40,6 +42,8 @@ pub struct ApfsFs<T: Read + Seek> {
     pub root_inode_id: u64,
     pub valid_volumes: Vec<(ApfsVolumeSuperblock, u64)>, // (volume, root_inode_id)
     cached_trees: std::collections::HashMap<u32, FsTree>,
+    compressed_cache: Option<((u32, u64), range::CompressedFile)>,
+    data_range_cache: Option<((u32, u64), range::Source)>,
 }
 
 impl<T: Read + Seek> ApfsFs<T> {
@@ -93,6 +97,8 @@ impl<T: Read + Seek> ApfsFs<T> {
             root_inode_id: selected.1,
             valid_volumes,
             cached_trees: std::collections::HashMap::new(),
+            compressed_cache: None,
+            data_range_cache: None,
         })
     }
 
@@ -492,8 +498,8 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         if length == 0 {
             return Ok(Vec::new());
         }
-        if let Some(decoded) = self.read_decompressed_file(file)? {
-            return Ok(decoded[..decoded.len().min(length)].to_vec());
+        if let Some(decoded) = self.read_decompressed_range(file, 0, length)? {
+            return Ok(decoded);
         }
         self.ensure_fstree(file.fs_index)?;
         let size = {
@@ -513,12 +519,8 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         if length == 0 {
             return Ok(Vec::new());
         }
-        if let Some(decoded) = self.read_decompressed_file(file)? {
-            let start = usize::try_from(offset)
-                .unwrap_or(usize::MAX)
-                .min(decoded.len());
-            let end = start.saturating_add(length).min(decoded.len());
-            return Ok(decoded[start..end].to_vec());
+        if let Some(decoded) = self.read_decompressed_range(file, offset, length)? {
+            return Ok(decoded);
         }
         self.ensure_fstree(file.fs_index)?;
         let size = {
@@ -799,67 +801,27 @@ impl<T: Read + Seek> ApfsFs<T> {
         if offset >= file_size {
             return Ok(Vec::new());
         }
-        let end = offset
-            .saturating_add(length as u64)
-            .min(file_size)
-            .min(offset + MAX_READ_BYTES);
-        let req_len = usize::try_from(end.saturating_sub(offset))
-            .map_err(|_| "requested slice length does not fit usize")?;
-        let mut out = vec![0u8; req_len];
-
-        self.ensure_fstree(file.fs_index)?;
-        let ext = {
+        let key = (file.fs_index, file.inode_id);
+        if self
+            .data_range_cache
+            .as_ref()
+            .is_none_or(|(id, _)| *id != key)
+        {
+            self.ensure_fstree(file.fs_index)?;
             let fst = self.cached_trees.get(&file.fs_index).unwrap();
-            let mut ext = fst
-                .file_extents(&mut self.apfs, file.inode_id)
-                .unwrap_or_default();
-            if ext.is_empty() && file.inode.private_id != 0 {
-                ext = fst
-                    .file_extents(&mut self.apfs, file.inode.private_id)
-                    .unwrap_or_default();
+            let mut extents = fst.file_extents(&mut self.apfs, file.inode_id)?;
+            if extents.is_empty() && file.inode.private_id != 0 {
+                extents = fst.file_extents(&mut self.apfs, file.inode.private_id)?;
             }
-            ext
-        };
-
-        let bs = self.apfs.block_size_u64();
-        for e in ext {
-            let ext_start = e.logical_addr;
-            let ext_end = e.logical_addr.saturating_add(e.length_bytes);
-            let ov_start = ext_start.max(offset);
-            let ov_end = ext_end.min(end);
-            if ov_end <= ov_start {
-                continue;
-            }
-
-            let read_len =
-                usize::try_from(ov_end - ov_start).map_err(|_| "extent overlap too large")?;
-            let mut buf = vec![0u8; read_len];
-
-            if e.phys_block_num != 0 {
-                let rel_in_ext = ov_start - ext_start;
-                let phys_byte = e
-                    .phys_block_num
-                    .checked_mul(bs)
-                    .and_then(|x| x.checked_add(rel_in_ext))
-                    .ok_or("physical offset overflow")?;
-                match self.apfs.body.seek(SeekFrom::Start(phys_byte)) {
-                    Ok(_) => self.apfs.body.read_exact(&mut buf)?,
-                    Err(io_err) if io_err.kind() == io::ErrorKind::InvalidInput => {
-                        warn!(
-                            "inode {}: extent phys_block={} maps to byte {} outside image slice; treating as sparse",
-                            file.inode_id, e.phys_block_num, phys_byte
-                        );
-                    }
-                    Err(io_err) => return Err(Box::new(io_err)),
-                }
-            }
-
-            let dst_off =
-                usize::try_from(ov_start - offset).map_err(|_| "destination offset too large")?;
-            out[dst_off..dst_off + read_len].copy_from_slice(&buf);
+            self.data_range_cache = Some((key, range::Source::stream(file_size, extents)?));
         }
-
-        Ok(out)
+        let bs = self.apfs.block_size_u64();
+        self.data_range_cache.as_ref().unwrap().1.read(
+            &mut self.apfs.body,
+            bs,
+            offset,
+            length.min(MAX_READ_BYTES as usize),
+        )
     }
 }
 

@@ -131,11 +131,7 @@ impl<T: Read + Seek> Filesystem for ExFatFS<T> {
         inode: &Self::FileType,
         length: usize,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
-        let mut data = self.read_file_content(inode)?;
-        if data.len() > length {
-            data.truncate(length);
-        }
-        Ok(data)
+        Ok(self.read_inode_range(inode, 0, length)?)
     }
 
     fn read_file_slice(
@@ -144,13 +140,7 @@ impl<T: Read + Seek> Filesystem for ExFatFS<T> {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
-        let data = self.read_file_content(inode)?;
-        let off = offset as usize;
-        if off >= data.len() {
-            return Ok(Vec::new());
-        }
-        let end = off.saturating_add(length).min(data.len());
-        Ok(data[off..end].to_vec())
+        Ok(self.read_inode_range(inode, offset, length)?)
     }
 
     fn list_dir(

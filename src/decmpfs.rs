@@ -359,6 +359,79 @@ fn decode_resource_fork(
     ensure_size(output, expected)
 }
 
+/// Index a resource fork through bounded range reads. Payload bytes are never
+/// loaded while parsing the table. Used by the APFS sequential/range reader.
+pub(crate) fn resource_ranges(
+    compression: Compression,
+    size: u64,
+    fork_size: u64,
+    mut read: impl FnMut(u64, usize) -> std::result::Result<Vec<u8>, String>,
+) -> std::result::Result<Vec<(u64, usize)>, String> {
+    let count =
+        usize::try_from(size.div_ceil(CHUNK_SIZE as u64)).map_err(|_| "chunk count overflow")?;
+    let table_len = if compression.raw_type == 4 {
+        count
+            .checked_mul(8)
+            .and_then(|n| n.checked_add(ZLIB_RSRC_ENTRIES_OFFSET))
+    } else {
+        count.checked_add(1).and_then(|n| n.checked_mul(4))
+    }
+    .ok_or("resource table length overflow")?;
+    if table_len > 4 * 1024 * 1024 || table_len as u64 > fork_size {
+        return Err("resource table exceeds 4 MiB limit or fork size".into());
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let table = read(0, table_len)?;
+    if table.len() != table_len {
+        return Err("truncated resource table".into());
+    }
+    let word = |at| le_u32(&table, at, "resource table").map_err(|e| e.to_string());
+    if compression.raw_type == 4 && word(ZLIB_RSRC_TABLE_OFFSET)? as usize != count {
+        return Err("resource chunk count disagrees with decoded size".into());
+    }
+    let mut ranges = Vec::with_capacity(count);
+    let mut previous_end = table_len as u64;
+    for index in 0..count {
+        let (start, end) = if compression.raw_type == 4 {
+            let at = ZLIB_RSRC_ENTRIES_OFFSET + index * 8;
+            let start = u64::from(word(at)?) + ZLIB_RSRC_TABLE_OFFSET as u64;
+            (start, start + u64::from(word(at + 4)?))
+        } else {
+            (
+                u64::from(word(index * 4)?),
+                u64::from(word((index + 1) * 4)?),
+            )
+        };
+        if start < previous_end || end <= start || end > fork_size || end - start > 1024 * 1024 {
+            return Err(format!("invalid or oversized compressed chunk {index}"));
+        }
+        ranges.push((start, (end - start) as usize));
+        previous_end = end;
+    }
+    if compression.raw_type != 4 && previous_end != fork_size {
+        return Err("last resource offset differs from fork size".into());
+    }
+    Ok(ranges)
+}
+
+pub(crate) fn decode_chunk(
+    compression: Compression,
+    bytes: &[u8],
+    expected: usize,
+) -> Result<Vec<u8>> {
+    if expected > CHUNK_SIZE {
+        return Err(DecmpfsError::InvalidResourceFork(
+            "oversized decoded chunk".into(),
+        ));
+    }
+    match stored_payload(compression.algorithm, bytes, true) {
+        StoredPayload::Verbatim(bytes) => copy_exact(bytes, expected),
+        StoredPayload::Encoded(bytes) => decode_codec(compression.algorithm, bytes, expected),
+    }
+}
+
 enum StoredPayload<'a> {
     Verbatim(&'a [u8]),
     Encoded(&'a [u8]),
@@ -757,6 +830,40 @@ mod tests {
             decompress_decmpfs(&header(11, 4, b"\xfftest"), None).unwrap(),
             b"test"
         );
+    }
+
+    #[test]
+    fn range_decoder_matches_whole_decoder_for_every_resource_codec() {
+        let lzvn = [
+            0xe5, b'h', b'e', b'l', b'l', b'o', 0x06, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let lzfse = [
+            0x62, 0x76, 0x78, 0x2d, 0x04, 0, 0, 0, b't', b'e', b's', b't', 0x62, 0x76, 0x78, 0x24,
+        ];
+        for (kind, expected, fork) in [
+            (4, 5usize, fixed_zlib_fork(&[zlib(b"hello")])),
+            (8, 5, absolute_fork(&[&lzvn])),
+            (10, 5, absolute_fork(&[b"\xccplain"])),
+            (12, 4, absolute_fork(&[&lzfse])),
+        ] {
+            let compression = classify(kind).unwrap();
+            let mut reads = Vec::new();
+            let ranges =
+                resource_ranges(compression, expected as u64, fork.len() as u64, |at, n| {
+                    reads.push(n);
+                    Ok(fork[at as usize..at as usize + n].to_vec())
+                })
+                .unwrap();
+            assert_eq!(reads.len(), 1);
+            assert!(reads[0] < fork.len());
+            let (at, n) = ranges[0];
+            let decoded =
+                decode_chunk(compression, &fork[at as usize..at as usize + n], expected).unwrap();
+            assert_eq!(
+                decoded,
+                decompress_decmpfs(&header(kind, expected, b""), Some(&fork)).unwrap()
+            );
+        }
     }
 
     #[test]
