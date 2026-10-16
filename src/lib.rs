@@ -1,4 +1,5 @@
 pub mod apfs_impl;
+pub mod btrfs_impl;
 pub mod decmpfs;
 pub mod detected_fs;
 pub mod directory_export;
