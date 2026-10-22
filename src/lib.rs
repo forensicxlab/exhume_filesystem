@@ -10,6 +10,7 @@ pub mod folder_impl;
 pub mod ntfs_impl;
 pub mod volume;
 pub mod volume_bitlocker;
+pub mod zfs_impl;
 pub use filesystem::{
     DirectoryEntryLimitError, File, FileIdentity, FileKind, Filesystem, FilesystemSourceView,
 };

@@ -18,6 +18,7 @@ exhume_extfs = "=0.1.18"
 exhume_ntfs = "=0.1.18"
 exhume_exfat = "=0.1.13"
 exhume_apfs = "=0.1.8"
+exhume_zfs = "=0.1.0"
 exhume_partitions = "=0.3.12"
 
 log = "0.4.25"

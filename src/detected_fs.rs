@@ -3,12 +3,14 @@ use crate::filesystem::{
     DirectoryCommon, File, FileCommon, FileIdentity, FileKind, Filesystem, FilesystemSourceView,
 };
 use crate::folder_impl::FolderFS;
+use crate::zfs_impl::ZfsFs;
 use exhume_apfs::APFS;
 use exhume_body::{Body, BodySlice, VolumeReader};
 use exhume_exfat::ExFatFS;
 use exhume_extfs::ExtFS;
 use exhume_ntfs::NTFS;
 use exhume_ntfs::bitlocker::{BitLockerStream, BitLockerVolumeOptions};
+use exhume_zfs::fs::ZfsFS;
 use log::info;
 use serde_json::Value;
 use std::any::Any;
@@ -97,6 +99,7 @@ pub enum DetectedFs<T: Read + Seek> {
     Ntfs(NTFS<T>),
     Exfat(ExFatFS<T>),
     Apfs(ApfsFs<T>),
+    Zfs(ZfsFs<T>),
     Folder(FolderFS),
 }
 
@@ -105,6 +108,7 @@ pub enum DetectedFile {
     Ntfs(exhume_ntfs::mft::MFTRecord),
     Exfat(exhume_exfat::exinode::ExInode),
     Apfs(crate::apfs_impl::ApfsFileRecord),
+    Zfs(crate::zfs_impl::ZfsFileRecord),
     Folder(crate::folder_impl::FolderFile),
 }
 
@@ -113,6 +117,7 @@ pub enum DetectedDir {
     Ntfs(exhume_ntfs::mft::DirectoryEntry),
     Exfat(exhume_exfat::compat::CompatDirEntry),
     Apfs(crate::apfs_impl::ApfsDirectoryEntry),
+    Zfs(crate::zfs_impl::ZfsDirectoryEntry),
     Folder(crate::folder_impl::FolderDirectory),
 }
 
@@ -123,6 +128,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.id(),
             DetectedFile::Exfat(inode) => inode.id(),
             DetectedFile::Apfs(inode) => inode.id(),
+            DetectedFile::Zfs(inode) => inode.id(),
             DetectedFile::Folder(file) => file.id(),
         }
     }
@@ -132,6 +138,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.size(),
             DetectedFile::Exfat(inode) => inode.size(),
             DetectedFile::Apfs(inode) => inode.size(),
+            DetectedFile::Zfs(inode) => inode.size(),
             DetectedFile::Folder(file) => file.size(),
         }
     }
@@ -141,6 +148,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.is_dir(),
             DetectedFile::Exfat(inode) => inode.is_dir(),
             DetectedFile::Apfs(inode) => inode.is_dir(),
+            DetectedFile::Zfs(inode) => inode.is_dir(),
             DetectedFile::Folder(file) => file.is_dir(),
         }
     }
@@ -150,6 +158,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.entry_kind(),
             DetectedFile::Exfat(inode) => inode.entry_kind(),
             DetectedFile::Apfs(inode) => inode.entry_kind(),
+            DetectedFile::Zfs(inode) => inode.entry_kind(),
             DetectedFile::Folder(file) => file.entry_kind(),
         }
     }
@@ -159,6 +168,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => FileCommon::to_string(record),
             DetectedFile::Exfat(inode) => FileCommon::to_string(inode),
             DetectedFile::Apfs(inode) => FileCommon::to_string(inode),
+            DetectedFile::Zfs(inode) => FileCommon::to_string(inode),
             DetectedFile::Folder(file) => FileCommon::to_string(file),
         }
     }
@@ -168,6 +178,7 @@ impl FileCommon for DetectedFile {
             DetectedFile::Ntfs(record) => record.to_json(),
             DetectedFile::Exfat(inode) => inode.to_json(),
             DetectedFile::Apfs(inode) => inode.to_json(),
+            DetectedFile::Zfs(inode) => inode.to_json(),
             DetectedFile::Folder(file) => file.to_json(),
         }
     }
@@ -180,6 +191,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.file_id(),
             DetectedDir::Exfat(d) => d.file_id(),
             DetectedDir::Apfs(d) => d.file_id(),
+            DetectedDir::Zfs(d) => d.file_id(),
             DetectedDir::Folder(d) => d.file_id(),
         }
     }
@@ -189,6 +201,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.name(),
             DetectedDir::Exfat(d) => d.name(),
             DetectedDir::Apfs(d) => d.name(),
+            DetectedDir::Zfs(d) => d.name(),
             DetectedDir::Folder(d) => d.name(),
         }
     }
@@ -198,6 +211,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => DirectoryCommon::to_string(d),
             DetectedDir::Exfat(d) => DirectoryCommon::to_string(d),
             DetectedDir::Apfs(d) => DirectoryCommon::to_string(d),
+            DetectedDir::Zfs(d) => DirectoryCommon::to_string(d),
             DetectedDir::Folder(d) => DirectoryCommon::to_string(d),
         }
     }
@@ -207,6 +221,7 @@ impl DirectoryCommon for DetectedDir {
             DetectedDir::Ntfs(d) => d.to_json(),
             DetectedDir::Exfat(d) => d.to_json(),
             DetectedDir::Apfs(d) => d.to_json(),
+            DetectedDir::Zfs(d) => d.to_json(),
             DetectedDir::Folder(d) => d.to_json(),
         }
     }
@@ -222,6 +237,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.filesystem_type(),
             DetectedFs::Exfat(fs) => fs.filesystem_type(),
             DetectedFs::Apfs(fs) => fs.filesystem_type(),
+            DetectedFs::Zfs(fs) => fs.filesystem_type(),
             DetectedFs::Folder(fs) => fs.filesystem_type(),
         }
     }
@@ -240,6 +256,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.path_separator(),
             DetectedFs::Exfat(fs) => fs.path_separator(),
             DetectedFs::Apfs(fs) => fs.path_separator(),
+            DetectedFs::Zfs(fs) => fs.path_separator(),
             DetectedFs::Folder(fs) => fs.path_separator(),
         }
     }
@@ -249,6 +266,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.record_count(),
             DetectedFs::Exfat(fs) => fs.record_count(),
             DetectedFs::Apfs(fs) => fs.record_count(),
+            DetectedFs::Zfs(fs) => fs.record_count(),
             DetectedFs::Folder(fs) => fs.record_count(),
         }
     }
@@ -258,6 +276,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.block_size(),
             DetectedFs::Exfat(fs) => fs.block_size(),
             DetectedFs::Apfs(fs) => fs.block_size(),
+            DetectedFs::Zfs(fs) => fs.block_size(),
             DetectedFs::Folder(fs) => fs.block_size(),
         }
     }
@@ -267,6 +286,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_metadata(),
             DetectedFs::Exfat(fs) => fs.get_metadata(),
             DetectedFs::Apfs(fs) => fs.get_metadata(),
+            DetectedFs::Zfs(fs) => fs.get_metadata(),
             DetectedFs::Folder(fs) => fs.get_metadata(),
         }
     }
@@ -276,6 +296,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_metadata_pretty(),
             DetectedFs::Exfat(fs) => fs.get_metadata_pretty(),
             DetectedFs::Apfs(fs) => fs.get_metadata_pretty(),
+            DetectedFs::Zfs(fs) => fs.get_metadata_pretty(),
             DetectedFs::Folder(fs) => fs.get_metadata_pretty(),
         }
     }
@@ -285,6 +306,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_file(file_id).map(DetectedFile::Ntfs),
             DetectedFs::Exfat(fs) => fs.get_file(file_id).map(DetectedFile::Exfat),
             DetectedFs::Apfs(fs) => fs.get_file(file_id).map(DetectedFile::Apfs),
+            DetectedFs::Zfs(fs) => fs.get_file(file_id).map(DetectedFile::Zfs),
             DetectedFs::Folder(fs) => fs.get_file(file_id).map(DetectedFile::Folder),
         }
     }
@@ -306,6 +328,9 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(parent), DetectedDir::Apfs(entry)) => {
                 fs.resolve_child(parent, entry).map(DetectedFile::Apfs)
             }
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(parent), DetectedDir::Zfs(entry)) => {
+                fs.resolve_child(parent, entry).map(DetectedFile::Zfs)
+            }
             (DetectedFs::Folder(fs), DetectedFile::Folder(parent), DetectedDir::Folder(entry)) => {
                 fs.resolve_child(parent, entry).map(DetectedFile::Folder)
             }
@@ -326,6 +351,9 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(parent), DetectedDir::Apfs(entry)) => {
                 fs.entry_identifier(parent, entry)
             }
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(parent), DetectedDir::Zfs(entry)) => {
+                fs.entry_identifier(parent, entry)
+            }
             (DetectedFs::Folder(fs), DetectedFile::Folder(parent), DetectedDir::Folder(entry)) => {
                 fs.entry_identifier(parent, entry)
             }
@@ -338,6 +366,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(file)) => fs.file_identity(file),
             (DetectedFs::Exfat(fs), DetectedFile::Exfat(file)) => fs.file_identity(file),
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(file)) => fs.file_identity(file),
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(file)) => fs.file_identity(file),
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.file_identity(file),
             _ => FileIdentity::new(0, file.id(), 0),
         }
@@ -348,6 +377,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(file)) => fs.file_identifier(file),
             (DetectedFs::Exfat(fs), DetectedFile::Exfat(file)) => fs.file_identifier(file),
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(file)) => fs.file_identifier(file),
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(file)) => fs.file_identifier(file),
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.file_identifier(file),
             _ => file.id(),
         }
@@ -368,6 +398,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Ntfs),
             DetectedFs::Exfat(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Exfat),
             DetectedFs::Apfs(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Apfs),
+            DetectedFs::Zfs(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Zfs),
             DetectedFs::Folder(fs) => fs.get_file_by_path(path, file_id).map(DetectedFile::Folder),
         }
     }
@@ -377,6 +408,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Ntfs(fs), DetectedFile::Ntfs(rec)) => fs.read_file_content(rec),
             (DetectedFs::Exfat(fs), DetectedFile::Exfat(inode)) => fs.read_file_content(inode),
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => fs.read_file_content(inode),
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(inode)) => fs.read_file_content(inode),
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => fs.read_file_content(file),
             _ => Err("filesystem / record variant mismatch".into()),
         }
@@ -394,6 +426,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             }
 
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => fs.read_file_prefix(inode, length),
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(inode)) => fs.read_file_prefix(inode, length),
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
                 fs.read_file_prefix(file, length)
             }
@@ -419,6 +452,9 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => {
                 fs.read_file_slice(inode, offset, length)
             }
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(inode)) => {
+                fs.read_file_slice(inode, offset, length)
+            }
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
                 fs.read_file_slice(file, offset, length)
             }
@@ -440,6 +476,8 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
                 .map(|v| v.into_iter().map(DetectedDir::Exfat).collect()),
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => Filesystem::list_dir(fs, inode)
                 .map(|v| v.into_iter().map(DetectedDir::Apfs).collect()),
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(inode)) => Filesystem::list_dir(fs, inode)
+                .map(|v| v.into_iter().map(DetectedDir::Zfs).collect()),
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => Filesystem::list_dir(fs, file)
                 .map(|v| v.into_iter().map(DetectedDir::Folder).collect()),
             _ => Err("filesystem / record variant mismatch".into()),
@@ -468,6 +506,10 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
                 Filesystem::list_dir_limited(fs, inode, maximum)
                     .map(|entries| entries.into_iter().map(DetectedDir::Apfs).collect())
             }
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(inode)) => {
+                Filesystem::list_dir_limited(fs, inode, maximum)
+                    .map(|entries| entries.into_iter().map(DetectedDir::Zfs).collect())
+            }
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
                 Filesystem::list_dir_limited(fs, file, maximum)
                     .map(|entries| entries.into_iter().map(DetectedDir::Folder).collect())
@@ -482,6 +524,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.get_root_file_id(),
             DetectedFs::Exfat(fs) => fs.get_root_file_id(),
             DetectedFs::Apfs(fs) => fs.get_root_file_id(),
+            DetectedFs::Zfs(fs) => fs.get_root_file_id(),
             DetectedFs::Folder(fs) => fs.get_root_file_id(),
         }
     }
@@ -494,6 +537,7 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             DetectedFs::Ntfs(fs) => fs.walk_fs(callback),
             DetectedFs::Exfat(fs) => fs.walk_fs(callback),
             DetectedFs::Apfs(fs) => fs.walk_fs(callback),
+            DetectedFs::Zfs(fs) => fs.walk_fs(callback),
             DetectedFs::Folder(fs) => fs.walk_fs(callback),
         }
     }
@@ -511,6 +555,9 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
             (DetectedFs::Apfs(fs), DetectedFile::Apfs(inode)) => {
                 fs.record_to_file(inode, inode_num, absolute_path)
             }
+            (DetectedFs::Zfs(fs), DetectedFile::Zfs(inode)) => {
+                fs.record_to_file(inode, inode_num, absolute_path)
+            }
             (DetectedFs::Folder(fs), DetectedFile::Folder(file)) => {
                 fs.record_to_file(file, inode_num, absolute_path)
             }
@@ -525,6 +572,24 @@ pub fn detect_filesystem(
     partition_size: u64,
     keys: Option<KeyMaterial>,
 ) -> Result<DetectedFs<ImageStream>, Box<dyn std::error::Error>> {
+    let mut partition = BodySlice::new(body, offset, partition_size)
+        .map_err(|e| format!("Could not create BodySlice: {e}"))?;
+    if exhume_zfs::fs::has_zfs_label(&mut partition) {
+        // Probed first: ZFS leaves the first 8 KiB of a vdev untouched, so a
+        // leftover ext superblock from a previous filesystem could otherwise
+        // win. A valid label whose pool cannot be opened is a damaged or
+        // unsupported pool: report it instead of probing other formats.
+        match ZfsFS::new(ImageStream::Raw(partition)) {
+            Ok(zfs) => {
+                info!("Detected a ZFS pool.");
+                return Ok(DetectedFs::Zfs(ZfsFs::new(zfs)));
+            }
+            Err(e) => {
+                return Err(format!("ZFS label found but the pool cannot be opened: {e}").into());
+            }
+        }
+    }
+
     let partition = BodySlice::new(body, offset, partition_size)
         .map_err(|e| format!("Could not create BodySlice: {e}"))?;
     if let Ok(ext_fs) = ExtFS::new(ImageStream::Raw(partition)) {
