@@ -1,5 +1,5 @@
 use crate::filesystem::{DirectoryCommon, FileCommon, FileIdentity, FileKind};
-use crate::filesystem::{File, Filesystem, WalkEvent};
+use crate::filesystem::{File, Filesystem};
 use exhume_ntfs::NTFS;
 use exhume_ntfs::mft::{Attribute, AttributeType, DirectoryEntry, MFTRecord, StandardInformation};
 use serde_json::Value;
@@ -14,7 +14,6 @@ use std::sync::Arc;
 const NTFS_WALK_MAX_DEPTH: usize = 1_024;
 const NTFS_WALK_DEFAULT_MAX_OCCURRENCES: usize = 2_000_000;
 const NTFS_WALK_HARD_MAX_OCCURRENCES: usize = 10_000_000;
-const NTFS_WALK_MAX_DIAGNOSTIC_EVENTS: usize = 100;
 const NTFS_WALK_MAX_OCCURRENCES_ENV: &str = "EXHUME_NTFS_WALK_MAX_OCCURRENCES";
 
 type NtfsDirectoryEntryIdentity = (u64, u16, Arc<str>);
@@ -220,193 +219,197 @@ impl<T: Read + Seek> Filesystem for NTFS<T> {
         self.list_dir(record.id())
     }
 
-    /// Walk every distinct NTFS directory-entry occurrence.
-    ///
-    /// A file reference number identifies a record, not a path. The generic
-    /// walker de-duplicates globally by that number, which loses additional
-    /// names for legitimate NTFS hard links. This override instead keys an
-    /// occurrence by its complete parent path, record number, sequence, and
-    /// entry name. An ancestor chain prevents corrupt directory cycles, while
-    /// explicit depth and occurrence limits bound hostile directory graphs.
-    fn walk_fs(&mut self, callback: &mut dyn FnMut(WalkEvent)) -> Result<(), Box<dyn Error>> {
-        struct PendingOccurrence {
-            record_id: u64,
-            expected_sequence: Option<u16>,
-            path: Arc<str>,
-            ancestor_directories: Arc<Vec<u64>>,
-            depth: usize,
-        }
-
-        let separator = self.path_separator();
-        let root_id = self.get_root_file_id();
-        let occurrence_limit = ntfs_walk_occurrence_limit();
-        // Iterative depth-first traversal keeps only the current frontier in
-        // memory. A breadth-first queue can retain millions of complete path
-        // strings before the indexer has a chance to process them.
-        let mut stack = vec![PendingOccurrence {
-            record_id: root_id,
-            expected_sequence: None,
-            path: Arc::from(separator.as_str()),
-            ancestor_directories: Arc::new(Vec::new()),
-            depth: 0,
-        }];
-        let mut queued_occurrences = 1usize;
-        let mut skipped_cycles = 0usize;
-        let mut skipped_stale_entries = 0usize;
-        let mut skipped_invalid_parent_entries = 0usize;
-
-        while let Some(pending) = stack.pop() {
-            let record = match self.get_file(pending.record_id) {
-                Ok(record) => record,
-                Err(error) => {
-                    let message = format!(
-                        "NTFS walk could not read {} (MFT #{}): {error}",
-                        pending.path, pending.record_id
-                    );
-                    callback(WalkEvent::Status(message.clone()));
-                    return Err(message.into());
-                }
-            };
-            if let Some(expected_sequence) = pending.expected_sequence
-                && record.header.sequence_number != expected_sequence
-            {
-                skipped_stale_entries = skipped_stale_entries.saturating_add(1);
-                if skipped_stale_entries <= NTFS_WALK_MAX_DIAGNOSTIC_EVENTS {
-                    callback(WalkEvent::Status(format!(
-                        "Skipping stale NTFS directory entry {}: MFT #{} has sequence {}, index expects {}",
-                        pending.path,
-                        pending.record_id,
-                        record.header.sequence_number,
-                        expected_sequence
-                    )));
-                }
-                continue;
-            }
-            let is_dir = record.is_dir();
-
-            if is_dir && pending.ancestor_directories.contains(&pending.record_id) {
-                skipped_cycles = skipped_cycles.saturating_add(1);
-                continue;
-            }
-
-            callback(WalkEvent::File(self.record_to_file(
-                &record,
-                pending.record_id,
-                pending.path.as_ref(),
-            )));
-
-            if !is_dir {
-                continue;
-            }
-
-            let entries = match Filesystem::list_dir(self, &record) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    let message = format!(
-                        "NTFS walk could not list {} (MFT #{}): {error}",
-                        pending.path, pending.record_id
-                    );
-                    callback(WalkEvent::Status(message.clone()));
-                    return Err(message.into());
-                }
-            };
-            if entries.is_empty() {
-                continue;
-            }
-            if pending.depth >= NTFS_WALK_MAX_DEPTH {
-                let message = format!(
-                    "NTFS walk aborted at depth limit {NTFS_WALK_MAX_DEPTH} while expanding {} (MFT #{})",
-                    pending.path, pending.record_id
-                );
-                callback(WalkEvent::Status(message.clone()));
-                return Err(message.into());
-            }
-
-            let mut child_ancestors = pending.ancestor_directories.as_ref().clone();
-            child_ancestors.push(pending.record_id);
-            let child_ancestors = Arc::new(child_ancestors);
-            // `pending.path` scopes this set to one concrete parent occurrence,
-            // so the identity is equivalent to (parent path, child reference,
-            // entry name) without retaining every full path for the whole walk.
-            let mut directory_entries = HashSet::<NtfsDirectoryEntryIdentity>::new();
-            let mut children = Vec::new();
-
-            for entry in entries {
-                if entry.parent_ref != pending.record_id
-                    || entry.parent_seq != record.header.sequence_number
-                {
-                    skipped_invalid_parent_entries =
-                        skipped_invalid_parent_entries.saturating_add(1);
-                    if skipped_invalid_parent_entries <= NTFS_WALK_MAX_DIAGNOSTIC_EVENTS {
-                        callback(WalkEvent::Status(format!(
-                            "Skipping NTFS index entry {:?} under {}: parent reference is MFT #{} sequence {}, expected MFT #{} sequence {}",
-                            entry.name,
-                            pending.path,
-                            entry.parent_ref,
-                            entry.parent_seq,
-                            pending.record_id,
-                            record.header.sequence_number
-                        )));
-                    }
-                    continue;
-                }
-
-                let child_id = entry.file_id();
-                let entry_name = Arc::<str>::from(entry.name());
-                if !insert_directory_entry(
-                    &mut directory_entries,
-                    child_id,
-                    entry.file_sequence,
-                    Arc::clone(&entry_name),
-                ) {
-                    continue;
-                }
-                if queued_occurrences >= occurrence_limit {
-                    let message = format!(
-                        "NTFS walk aborted after {occurrence_limit} directory-entry occurrences; set {NTFS_WALK_MAX_OCCURRENCES_ENV} to raise the limit up to {NTFS_WALK_HARD_MAX_OCCURRENCES}"
-                    );
-                    callback(WalkEvent::Status(message.clone()));
-                    return Err(message.into());
-                }
-
-                let child_path = if pending.path.as_ref() == separator {
-                    format!("{separator}{entry_name}")
-                } else {
-                    format!("{}{separator}{entry_name}", pending.path)
-                };
-                children.push(PendingOccurrence {
-                    record_id: child_id,
-                    expected_sequence: Some(entry.file_sequence),
-                    path: Arc::from(child_path),
-                    ancestor_directories: Arc::clone(&child_ancestors),
-                    depth: pending.depth + 1,
-                });
-                queued_occurrences += 1;
-            }
-            // Preserve the directory listing's order despite the LIFO stack.
-            stack.extend(children.into_iter().rev());
-        }
-
-        if skipped_cycles > 0 {
-            callback(WalkEvent::Status(format!(
-                "NTFS walk skipped {skipped_cycles} cyclic directory reference(s)"
-            )));
-        }
-        if skipped_stale_entries > NTFS_WALK_MAX_DIAGNOSTIC_EVENTS {
-            callback(WalkEvent::Status(format!(
-                "NTFS walk skipped {skipped_stale_entries} stale directory entries; individual warnings were limited to {NTFS_WALK_MAX_DIAGNOSTIC_EVENTS}"
-            )));
-        }
-        if skipped_invalid_parent_entries > NTFS_WALK_MAX_DIAGNOSTIC_EVENTS {
-            callback(WalkEvent::Status(format!(
-                "NTFS walk skipped {skipped_invalid_parent_entries} entries with invalid parent references; individual warnings were limited to {NTFS_WALK_MAX_DIAGNOSTIC_EVENTS}"
-            )));
-        }
-
-        Ok(())
+    fn walk_roots(
+        &mut self,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Vec<crate::walk::WalkRoot>> {
+        context.restrict_limits(NTFS_WALK_MAX_DEPTH, ntfs_walk_occurrence_limit() as u64);
+        Ok(vec![crate::walk::WalkRoot {
+            identifier: 5,
+            path: "\\".to_owned(),
+        }])
     }
 
-    // Record to File object implementation for NTFS
+    fn walk_root(
+        &mut self,
+        identifier: u64,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Option<Self::FileType>> {
+        let raw = self
+            .get_file_id_raw(identifier)
+            .map_err(|error| context.source_error(error))?;
+        if raw.header.flags & 1 == 0 || raw.header.base_file_record != 0 {
+            return Err(context.source_error("NTFS root is not an allocated base record"));
+        }
+        self.hydrate_attribute_list(raw)
+            .map(Some)
+            .map_err(|error| context.source_error(error))
+    }
+
+    fn walk_child(
+        &mut self,
+        parent: &Self::FileType,
+        entry: &Self::DirectoryType,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Option<Self::FileType>> {
+        use crate::walk::*;
+        let raw = match self.get_file_id_raw(entry.file_id) {
+            Ok(record) => record,
+            Err(error) => {
+                let mut issue = WalkIssue::new(
+                    context.path(),
+                    WalkStage::RecordRead,
+                    WalkIssueCode::RecordReadFailed,
+                    WalkAction::SkipEntry,
+                    error.to_string(),
+                );
+                issue.record_id = Some(entry.file_id);
+                issue.expected_generation = Some(u64::from(entry.file_sequence));
+                context.issue(issue)?;
+                return Ok(None);
+            }
+        };
+        let identity = FileIdentity::new(0, raw.id, u64::from(raw.header.sequence_number));
+        let invalid =
+            if entry.parent_ref != parent.id || entry.parent_seq != parent.header.sequence_number {
+                Some((
+                    WalkIssueCode::InvalidParentReference,
+                    "directory key has an invalid parent reference".to_owned(),
+                ))
+            } else if entry.file_sequence != raw.header.sequence_number {
+                Some((
+                    WalkIssueCode::StaleReference,
+                    format!(
+                        "MFT #{} has sequence {}, directory expects {}",
+                        raw.id, raw.header.sequence_number, entry.file_sequence
+                    ),
+                ))
+            } else if raw.header.flags & 1 == 0 {
+                Some((
+                    WalkIssueCode::InactiveRecord,
+                    format!("MFT #{} is not in use", raw.id),
+                ))
+            } else if raw.header.base_file_record != 0 {
+                Some((
+                    WalkIssueCode::ExtensionRecordReference,
+                    format!(
+                        "Directory entry targets extension MFT #{} instead of a base record",
+                        raw.id
+                    ),
+                ))
+            } else {
+                None
+            };
+        if let Some((code, message)) = invalid {
+            let mut issue = WalkIssue::new(
+                context.path(),
+                WalkStage::IdentityValidation,
+                code,
+                WalkAction::SkipEntry,
+                message,
+            );
+            issue.record_id = Some(raw.id);
+            issue.identity = Some(identity);
+            issue.expected_generation = Some(u64::from(entry.file_sequence));
+            context.issue(issue)?;
+            return Ok(None);
+        }
+        let is_dir = raw.is_dir();
+        match self.hydrate_attribute_list(raw) {
+            Ok(record) => Ok(Some(record)),
+            Err(error) => {
+                let mut issue = WalkIssue::new(
+                    context.path(),
+                    WalkStage::AttributeList,
+                    WalkIssueCode::AttributeListInvalid,
+                    if is_dir {
+                        WalkAction::SkipSubtree
+                    } else {
+                        WalkAction::SkipEntry
+                    },
+                    error.to_string(),
+                );
+                issue.record_id = Some(entry.file_id);
+                issue.identity = Some(identity);
+                issue.expected_generation = Some(u64::from(entry.file_sequence));
+                context.issue(issue)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn walk_directory(
+        &mut self,
+        record: &Self::FileType,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Vec<Self::DirectoryType>> {
+        use crate::walk::*;
+        use exhume_ntfs::DirectoryIssueKind;
+        let mut delivery_error = None;
+        let result = self.list_dir_with_diagnostics(record.id, &mut |diagnostic| {
+            let code = match diagnostic.kind {
+                DirectoryIssueKind::InvalidIndexRoot => WalkIssueCode::InvalidIndexRoot,
+                DirectoryIssueKind::InvalidIndexBlock => WalkIssueCode::InvalidIndexBlock,
+                DirectoryIssueKind::TruncatedIndexBlock => WalkIssueCode::TruncatedIndexBlock,
+                DirectoryIssueKind::IndexBlockReadFailed => WalkIssueCode::IndexBlockReadFailed,
+                DirectoryIssueKind::InvalidParentReference => WalkIssueCode::InvalidParentReference,
+            };
+            let mut issue = WalkIssue::new(
+                context.path(),
+                WalkStage::DirectoryIndex,
+                code,
+                if matches!(diagnostic.kind, DirectoryIssueKind::InvalidParentReference) {
+                    WalkAction::SkipEntry
+                } else {
+                    WalkAction::SkipIndexBlock
+                },
+                diagnostic.message,
+            );
+            issue.record_id = diagnostic.child_record.or(Some(record.id));
+            issue.identity = diagnostic
+                .child_record
+                .is_none()
+                .then_some(FileIdentity::new(
+                    0,
+                    record.id,
+                    u64::from(record.header.sequence_number),
+                ));
+            issue.index_block = diagnostic.index_block;
+            if let Err(error) = context.issue(issue) {
+                delivery_error = Some(error);
+                return Err("walk diagnostic delivery failed".into());
+            }
+            Ok(())
+        });
+        if let Some(error) = delivery_error {
+            return Err(error);
+        }
+        match result {
+            Ok(mut entries) => {
+                let mut seen = HashSet::new();
+                entries.retain(|entry| {
+                    insert_directory_entry(
+                        &mut seen,
+                        entry.file_id,
+                        entry.file_sequence,
+                        Arc::from(entry.name()),
+                    )
+                });
+                Ok(entries)
+            }
+            Err(error) if context.is_root() => Err(context.source_error(error)),
+            Err(error) => {
+                context.read_failure(
+                    WalkStage::DirectoryRead,
+                    WalkIssueCode::DirectoryReadFailed,
+                    WalkAction::SkipSubtree,
+                    error,
+                )?;
+                Ok(Vec::new())
+            }
+        }
+    }
+
     fn record_to_file(&self, record: &Self::FileType, file_id: u64, absolute_path: &str) -> File {
         let name = walked_entry_name(absolute_path)
             .map(str::to_owned)

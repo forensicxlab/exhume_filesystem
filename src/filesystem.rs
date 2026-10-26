@@ -140,14 +140,7 @@ pub struct File {
     pub metadata: Value,          // Filesystem-specific extra metadata
 }
 
-/// Dispatched events during `walk_fs`.
-#[allow(clippy::large_enum_variant)]
-pub enum WalkEvent {
-    /// A regular file or directory was discovered.
-    File(File),
-    /// An intermediate status message for long-running operations.
-    Status(String),
-}
+pub use crate::walk::WalkEvent;
 
 /// The Filesystem trait
 pub trait Filesystem {
@@ -253,55 +246,100 @@ pub trait Filesystem {
     fn record_to_file(&self, file: &Self::FileType, file_id: u64, absolute_path: &str) -> File;
     fn get_root_file_id(&self) -> u64;
 
-    /// Walk the filesystem and call the callback for each file found.
-    /// This default implementation uses Breadth-First Search via `get_file` and `list_dir`.
-    fn walk_fs(&mut self, callback: &mut dyn FnMut(WalkEvent)) -> Result<(), Box<dyn Error>> {
-        use std::collections::{HashSet, VecDeque};
-        let mut seen: HashSet<u64> = HashSet::new();
-        let mut queue: VecDeque<(u64, String)> = VecDeque::new();
-
-        let root_id = self.get_root_file_id();
-        queue.push_back((root_id, self.path_separator()));
-
-        while let Some((record_id, path)) = queue.pop_front() {
-            if !seen.insert(record_id) {
-                continue;
-            }
-
-            let record = match self.get_file(record_id) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            let file_obj = self.record_to_file(&record, record_id, &path);
-            let is_dir = record.is_dir();
-
-            callback(WalkEvent::File(file_obj));
-
-            if is_dir && let Ok(entries) = self.list_dir(&record) {
-                for entry in entries {
-                    let child_id = entry.file_id();
-                    let child_path = if path == self.path_separator() {
-                        format!("{}{}", self.path_separator(), entry.name())
-                    } else {
-                        format!("{}{}{}", path, self.path_separator(), entry.name())
-                    };
-                    queue.push_back((child_id, child_path));
-                }
-            }
-        }
-
-        Ok(())
+    /// Stream every validated path through the common traversal engine.
+    /// Local gaps are logged and delivered as typed events; fatal failures
+    /// return their partial coverage. No filesystem-specific traversal loop is needed.
+    fn walk_fs(
+        &mut self,
+        options: &crate::walk::WalkOptions,
+        callback: &mut crate::walk::WalkCallback<'_>,
+    ) -> crate::walk::WalkResult<crate::walk::WalkReport> {
+        crate::walk::run(self, options, callback)
     }
 
-    /// Return all files in the filesystem
+    /// Namespace roots for the shared walker. Override for multi-volume sources.
+    #[doc(hidden)]
+    fn walk_roots(
+        &mut self,
+        _context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Vec<crate::walk::WalkRoot>> {
+        Ok(vec![crate::walk::WalkRoot {
+            identifier: self.get_root_file_id(),
+            path: self.path_separator(),
+        }])
+    }
+
+    #[doc(hidden)]
+    fn walk_root(
+        &mut self,
+        identifier: u64,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Option<Self::FileType>> {
+        self.get_file(identifier)
+            .map(Some)
+            .map_err(|error| context.source_error(error))
+    }
+
+    #[doc(hidden)]
+    fn walk_child(
+        &mut self,
+        parent: &Self::FileType,
+        entry: &Self::DirectoryType,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Option<Self::FileType>> {
+        match self.resolve_child(parent, entry) {
+            Ok(record) => Ok(Some(record)),
+            Err(error) => {
+                context.read_failure(
+                    crate::walk::WalkStage::RecordRead,
+                    crate::walk::WalkIssueCode::RecordReadFailed,
+                    crate::walk::WalkAction::SkipEntry,
+                    error,
+                )?;
+                Ok(None)
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    fn walk_directory(
+        &mut self,
+        record: &Self::FileType,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Vec<Self::DirectoryType>> {
+        match self.list_dir(record) {
+            Ok(entries) => Ok(entries),
+            Err(error) if context.is_root() => Err(context.source_error(error)),
+            Err(error) => {
+                context.read_failure(
+                    crate::walk::WalkStage::DirectoryRead,
+                    crate::walk::WalkIssueCode::DirectoryReadFailed,
+                    crate::walk::WalkAction::SkipSubtree,
+                    error,
+                )?;
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    fn finish_walk(&mut self) {}
+
+    /// Collect files using the same validation and recovery as streaming callers.
     fn enumerate_all_files(&mut self) -> Result<Vec<File>, Box<dyn Error>> {
         let mut files = Vec::new();
-        self.walk_fs(&mut |event| {
-            if let WalkEvent::File(f) = event {
-                files.push(f);
+        let report = self.walk_fs(&crate::walk::WalkOptions::default(), &mut |event| {
+            if let WalkEvent::File(file) = event {
+                files.push(file);
             }
+            Ok(())
         })?;
+        if matches!(
+            report.status,
+            crate::walk::WalkStatus::Cancelled | crate::walk::WalkStatus::Aborted
+        ) {
+            return Err(format!("filesystem enumeration stopped: {:?}", report.status).into());
+        }
         Ok(files)
     }
 

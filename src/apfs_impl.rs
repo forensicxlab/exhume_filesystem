@@ -5,7 +5,7 @@ use exhume_apfs::{
     XattrRecord, XattrStorage, apfs_kind, is_dir_mode,
 };
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -36,6 +36,13 @@ pub struct ApfsDirectoryEntry {
     pub date_added: u64,
 }
 
+struct WalkCache {
+    fs_index: u32,
+    inodes: HashMap<u64, InodeVal>,
+    directories: HashMap<u64, Vec<DirEntry>>,
+    xattrs: HashMap<u64, Vec<XattrRecord>>,
+}
+
 pub struct ApfsFs<T: Read + Seek> {
     pub apfs: APFS<T>,
     pub volume: ApfsVolumeSuperblock,
@@ -44,9 +51,27 @@ pub struct ApfsFs<T: Read + Seek> {
     cached_trees: std::collections::HashMap<u32, FsTree>,
     compressed_cache: Option<((u32, u64), range::CompressedFile)>,
     data_range_cache: Option<((u32, u64), range::Source)>,
+    walk_cache: Option<WalkCache>,
 }
 
 impl<T: Read + Seek> ApfsFs<T> {
+    fn walk_cached_record(&self, inode_id: u64) -> Option<ApfsFileRecord> {
+        let cache = self.walk_cache.as_ref()?;
+        let inode = cache.inodes.get(&inode_id)?.clone();
+        let xattrs = cache
+            .xattrs
+            .get(&inode_id)
+            .or_else(|| cache.xattrs.get(&inode.private_id))
+            .cloned()
+            .unwrap_or_default();
+        Some(ApfsFileRecord {
+            fs_index: cache.fs_index,
+            inode_id,
+            inode,
+            xattrs,
+        })
+    }
+
     pub fn new(mut apfs: APFS<T>) -> Result<Self, Box<dyn Error>> {
         if apfs.volumes.is_empty() {
             return Err("No APFS volumes discovered".into());
@@ -99,6 +124,7 @@ impl<T: Read + Seek> ApfsFs<T> {
             cached_trees: std::collections::HashMap::new(),
             compressed_cache: None,
             data_range_cache: None,
+            walk_cache: None,
         })
     }
 
@@ -660,86 +686,143 @@ impl<T: Read + Seek> Filesystem for ApfsFs<T> {
         Ok(current)
     }
 
-    fn walk_fs(
+    fn walk_roots(
         &mut self,
-        callback: &mut dyn FnMut(crate::filesystem::WalkEvent),
-    ) -> Result<(), Box<dyn Error>> {
-        let vols = self.valid_volumes.clone();
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Vec<crate::walk::WalkRoot>> {
+        if self.valid_volumes.is_empty() {
+            return Err(context.source_error("APFS has no valid filesystem roots"));
+        }
+        Ok(self
+            .valid_volumes
+            .iter()
+            .map(|(volume, id)| crate::walk::WalkRoot {
+                identifier: pack_identifier(volume.fs_index, *id),
+                path: format!("/volume_{}", volume.fs_index),
+            })
+            .collect())
+    }
 
-        for (vol, root_inode_id) in vols {
-            self.ensure_fstree(vol.fs_index)?;
-            let fst = self.cached_trees.get(&vol.fs_index).unwrap();
-
-            callback(crate::filesystem::WalkEvent::Status(format!(
-                "Scanning APFS volume {} B-Tree...",
-                vol.fs_index
-            )));
-
-            // Linear B-Tree scan to load all records into memory at once
-            let (inodes, drecs, mut xattrs) = fst.scan_all_records_with_xattrs(
-                &mut self.apfs,
-                Some(&mut |count| {
-                    callback(crate::filesystem::WalkEvent::Status(format!(
-                        "Scanning APFS B-Tree... {} records processed",
-                        count
-                    )));
-                }),
-            )?;
-
-            callback(crate::filesystem::WalkEvent::Status(format!(
-                "Building tree for volume {}...",
-                vol.fs_index
-            )));
-            let mut visited = HashSet::<u64>::new();
-            let mut queue = VecDeque::<(u64, String)>::new();
-            let vol_prefix = format!("/volume_{}", vol.fs_index);
-            queue.push_back((root_inode_id, vol_prefix.clone()));
-
-            while let Some((inode_id, path)) = queue.pop_front() {
-                if !visited.insert(inode_id) {
-                    continue;
+    fn walk_root(
+        &mut self,
+        identifier: u64,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Option<Self::FileType>> {
+        let (fs_index, inode_id) = unpack_identifier(identifier)
+            .ok_or_else(|| context.source_error("invalid APFS walk root reference"))?;
+        self.ensure_fstree(fs_index)
+            .map_err(|error| context.source_error(error))?;
+        let fst = self
+            .cached_trees
+            .get(&fs_index)
+            .ok_or_else(|| context.source_error("APFS filesystem tree is unavailable"))?;
+        context.status(format!("Scanning APFS volume {fs_index} B-Tree..."))?;
+        let mut callback_error = None;
+        let mut last_progress = 0usize;
+        let records = fst.scan_all_records_with_xattrs(
+            &mut self.apfs,
+            Some(&mut |count| {
+                if context.is_cancelled() {
+                    return Err("APFS scan cancelled".into());
                 }
-
-                let inode = match inodes.get(&inode_id) {
-                    Some(v) => v.clone(),
-                    None => continue,
-                };
-
-                let inode_xattrs = xattrs.remove(&inode_id).or_else(|| {
-                    (inode.private_id != 0 && inode.private_id != inode_id)
-                        .then(|| xattrs.remove(&inode.private_id))
-                        .flatten()
-                });
-                let rec = ApfsFileRecord {
-                    fs_index: vol.fs_index,
-                    inode_id,
-                    inode,
-                    xattrs: inode_xattrs.unwrap_or_default(),
-                };
-                let packed_id = pack_identifier(vol.fs_index, inode_id);
-                callback(crate::filesystem::WalkEvent::File(
-                    self.record_to_file(&rec, packed_id, &path),
-                ));
-
-                if rec.is_dir()
-                    && let Some(children) = drecs.get(&inode_id)
-                {
-                    for de in children {
-                        let Some(child_inode) = de.inode_id else {
-                            continue;
-                        };
-                        let child_path = if path == vol_prefix {
-                            format!("{}/{}", vol_prefix, de.name)
-                        } else {
-                            format!("{}/{}", path, de.name)
-                        };
-                        queue.push_back((child_inode, child_path));
+                if count.saturating_sub(last_progress) >= 10_000 {
+                    last_progress = count;
+                    if let Err(error) =
+                        context.status(format!("Scanning APFS B-Tree... {count} items processed"))
+                    {
+                        callback_error = Some(error);
+                        return Err("APFS progress delivery failed".into());
                     }
                 }
+                Ok(())
+            }),
+        );
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        if context.is_cancelled() {
+            return Ok(None);
+        }
+        let (inodes, directories, xattrs) = records.map_err(|error| context.source_error(error))?;
+        self.walk_cache = Some(WalkCache {
+            fs_index,
+            inodes,
+            directories,
+            xattrs,
+        });
+        self.walk_cached_record(inode_id)
+            .map(Some)
+            .ok_or_else(|| context.source_error("APFS root inode is missing"))
+    }
+
+    fn walk_child(
+        &mut self,
+        parent: &Self::FileType,
+        entry: &Self::DirectoryType,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Option<Self::FileType>> {
+        use crate::walk::*;
+        if parent.fs_index != entry.fs_index {
+            context.read_failure(
+                WalkStage::IdentityValidation,
+                WalkIssueCode::InvalidParentReference,
+                WalkAction::SkipEntry,
+                "APFS directory key belongs to another volume",
+            )?;
+            return Ok(None);
+        }
+        if self
+            .walk_cache
+            .as_ref()
+            .is_none_or(|cache| cache.fs_index != parent.fs_index)
+        {
+            return Err(context.source_error("APFS walk cache does not match its volume"));
+        }
+        match self.walk_cached_record(entry.inode_id) {
+            Some(record) => Ok(Some(record)),
+            None => {
+                context.read_failure(
+                    WalkStage::RecordRead,
+                    WalkIssueCode::RecordReadFailed,
+                    WalkAction::SkipEntry,
+                    "APFS directory references a missing inode",
+                )?;
+                Ok(None)
             }
         }
+    }
 
-        Ok(())
+    fn walk_directory(
+        &mut self,
+        record: &Self::FileType,
+        context: &mut crate::walk::WalkContext<'_>,
+    ) -> crate::walk::WalkResult<Vec<Self::DirectoryType>> {
+        let cache = self
+            .walk_cache
+            .as_ref()
+            .filter(|cache| cache.fs_index == record.fs_index)
+            .ok_or_else(|| context.source_error("APFS walk directory cache is unavailable"))?;
+        let mut entries = Vec::new();
+        if let Some(children) = cache.directories.get(&record.inode_id) {
+            for child in children {
+                if context.is_cancelled() {
+                    break;
+                }
+                entries.push(ApfsDirectoryEntry {
+                    fs_index: record.fs_index,
+                    inode_id: child.inode_id.unwrap_or(child.raw_id),
+                    name: child.name.clone(),
+                    raw_id: child.raw_id,
+                    flags: child.flags,
+                    date_added: child.date_added,
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    fn finish_walk(&mut self) {
+        self.walk_cache = None;
     }
 }
 

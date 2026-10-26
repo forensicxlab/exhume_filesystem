@@ -487,14 +487,15 @@ impl<T: Read + Seek + 'static> Filesystem for DetectedFs<T> {
     }
     fn walk_fs(
         &mut self,
-        callback: &mut dyn FnMut(crate::filesystem::WalkEvent),
-    ) -> Result<(), Box<dyn Error>> {
+        options: &crate::walk::WalkOptions,
+        callback: &mut crate::walk::WalkCallback<'_>,
+    ) -> crate::walk::WalkResult<crate::walk::WalkReport> {
         match self {
-            DetectedFs::Ext(fs) => fs.walk_fs(callback),
-            DetectedFs::Ntfs(fs) => fs.walk_fs(callback),
-            DetectedFs::Exfat(fs) => fs.walk_fs(callback),
-            DetectedFs::Apfs(fs) => fs.walk_fs(callback),
-            DetectedFs::Folder(fs) => fs.walk_fs(callback),
+            DetectedFs::Ext(fs) => fs.walk_fs(options, callback),
+            DetectedFs::Ntfs(fs) => fs.walk_fs(options, callback),
+            DetectedFs::Exfat(fs) => fs.walk_fs(options, callback),
+            DetectedFs::Apfs(fs) => fs.walk_fs(options, callback),
+            DetectedFs::Folder(fs) => fs.walk_fs(options, callback),
         }
     }
     fn record_to_file(&self, record: &Self::FileType, inode_num: u64, absolute_path: &str) -> File {

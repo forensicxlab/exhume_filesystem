@@ -2,7 +2,7 @@ mod export_cli;
 
 use clap::*;
 use clap_num::maybe_hex;
-use exhume_body::Body;
+use exhume_body::{Body, credentials};
 use exhume_filesystem::Filesystem;
 use exhume_filesystem::detected_fs::{DetectedFs, KeyMaterial, detect_filesystem};
 use exhume_filesystem::filesystem::DirectoryCommon;
@@ -14,7 +14,7 @@ use std::path::Path;
 use zeroize::Zeroize;
 
 fn main() {
-    let mut matches = Command::new("exhume_filesystem")
+    let command = Command::new("exhume_filesystem")
         .version(crate_version!())
         .author(crate_authors!())
         .about("Exhume in a standardized and normalized way files & directories from a given filesystem.")
@@ -121,7 +121,8 @@ fn main() {
         )
         .subcommand(export_cli::command())
         .subcommand_negates_reqs(true)
-        .get_matches();
+        ;
+    let mut matches = password_args(command).get_matches();
 
     // Initialize logger.
     let log_level_str = matches.get_one::<String>("log_level").unwrap();
@@ -143,7 +144,19 @@ fn main() {
                 std::process::exit(2);
             }
         };
-        if let Err(message) = export_cli::run(arguments) {
+        let options = credentials::read_open_options(
+            &arguments.body.to_string_lossy(),
+            &arguments.format,
+            export_matches
+                .get_one::<String>("password_file")
+                .map(String::as_str),
+            export_matches.get_flag("password_stdin"),
+        )
+        .unwrap_or_else(|message| {
+            error!("{message}");
+            std::process::exit(1);
+        });
+        if let Err(message) = export_cli::run_with_options(arguments, &options) {
             error!("{message}");
             std::process::exit(1);
         }
@@ -152,8 +165,8 @@ fn main() {
 
     let mut keys = None;
     if let Some(mut fvek_hex) = matches.remove_one::<String>("fvek") {
-        eprintln!(
-            "SECURITY WARNING: top-level --fvek is deprecated because command-line arguments may be exposed in process listings and shell history. Prefer export-volume --fvek-file or piped --fvek-stdin."
+        log::warn!(
+            "Top-level --fvek is deprecated because command-line arguments may be exposed in process listings and shell history. Prefer export-volume --fvek-file or piped --fvek-stdin."
         );
         let decoded = hex::decode(&fvek_hex);
         fvek_hex.zeroize();
@@ -197,6 +210,18 @@ fn main() {
     let print = matches.get_flag("print");
     let dump = matches.get_flag("dump");
     let json_output = matches.get_flag("json");
+    let body_options = credentials::read_open_options(
+        file_path,
+        format,
+        matches
+            .get_one::<String>("password_file")
+            .map(String::as_str),
+        matches.get_flag("password_stdin"),
+    )
+    .unwrap_or_else(|message| {
+        error!("{message}");
+        std::process::exit(1);
+    });
 
     let mut filesystem: DetectedFs<exhume_filesystem::detected_fs::ImageStream> = if is_directory {
         let fs = FolderFS::new(path.to_path_buf());
@@ -205,7 +230,11 @@ fn main() {
         let offset_val = *offset.unwrap();
         let size_val = *size.unwrap();
 
-        let body = Body::new(file_path.to_owned(), format);
+        let body =
+            Body::open(file_path.to_owned(), format, &body_options).unwrap_or_else(|message| {
+                error!("{message}");
+                std::process::exit(1);
+            });
         debug!("Created Body from '{}'", file_path);
 
         let partition_size = size_val * body.get_sector_size() as u64;
@@ -294,42 +323,86 @@ fn main() {
     }
 
     if enumerate {
-        if json_output {
-            let mut files = Vec::new();
-            let collected = filesystem.walk_fs(&mut |event| match event {
-                exhume_filesystem::filesystem::WalkEvent::File(f) => files.push(f),
-                exhume_filesystem::filesystem::WalkEvent::Status(msg) => info!("{}", msg),
-            });
-            match collected {
-                Ok(_) => {
+        use exhume_filesystem::{WalkEvent, WalkOptions, WalkStatus};
+        let mut files = Vec::new();
+        let result = filesystem.walk_fs(&WalkOptions::default(), &mut |event| {
+            match event {
+                WalkEvent::File(file) if json_output => files.push(file),
+                WalkEvent::File(file) => {
+                    if let Some(display) = file.display {
+                        println!("{display}");
+                    } else {
+                        println!(
+                            "[{}] - {} {} {} {} {} {}",
+                            file.identifier,
+                            file.permissions.as_deref().unwrap_or("??????????"),
+                            exhume_apfs::fmt_apfs_ns_utc(
+                                file.modified.unwrap_or(0) * 1_000_000_000
+                            ),
+                            file.owner.as_deref().unwrap_or("-"),
+                            file.group.as_deref().unwrap_or("-"),
+                            file.size,
+                            file.absolute_path
+                        );
+                    }
+                }
+                // The shared walker logs each issue once; events remain
+                // available to consumers that persist diagnostics.
+                WalkEvent::Issue(_) => {}
+                WalkEvent::Status(message) => info!("{message}"),
+            }
+            Ok(())
+        });
+        match result {
+            Ok(report) => {
+                if json_output {
                     println!("{}", serde_json::to_string_pretty(&files).unwrap());
                 }
-                Err(err) => {
-                    error!("Failed JSON enumeration: {:?}", err);
-                }
-            }
-        } else if let Err(err) = filesystem.walk_fs(&mut |event| match event {
-            exhume_filesystem::filesystem::WalkEvent::File(file) => {
-                if let Some(custom_display) = file.display {
-                    println!("{}", custom_display);
+                if report.issues > 0 {
+                    log::warn!(
+                        "Filesystem walk {:?}: {} issues, {} files, {} directories",
+                        report.status,
+                        report.issues,
+                        report.files,
+                        report.directories
+                    );
                 } else {
-                    println!(
-                        "[{}] - {} {} {} {} {} {}",
-                        file.identifier,
-                        file.permissions
-                            .clone()
-                            .unwrap_or_else(|| "??????????".to_string()),
-                        exhume_apfs::fmt_apfs_ns_utc(file.modified.unwrap_or(0) * 1_000_000_000),
-                        file.owner.clone().unwrap_or_else(|| "-".to_string()),
-                        file.group.clone().unwrap_or_else(|| "-".to_string()),
-                        file.size,
-                        file.absolute_path
+                    info!(
+                        "Filesystem walk {:?}: {} files, {} directories",
+                        report.status, report.files, report.directories
                     );
                 }
+                match report.status {
+                    WalkStatus::Complete => {}
+                    WalkStatus::CompletedWithIssues => std::process::exit(2),
+                    WalkStatus::Cancelled => std::process::exit(130),
+                    WalkStatus::Aborted | WalkStatus::Failed => std::process::exit(1),
+                }
             }
-            exhume_filesystem::filesystem::WalkEvent::Status(msg) => info!("{}", msg),
-        }) {
-            error!("Could not enumerate the files: {:?}", err);
+            Err(error) => {
+                error!("Could not enumerate the files: {error}");
+                std::process::exit(1);
+            }
         }
     }
+}
+
+/// Register this executable's mutually exclusive container-password sources.
+fn password_args(command: clap::Command) -> clap::Command {
+    command
+        .arg(
+            clap::Arg::new("password_file")
+                .long("password-file")
+                .global(true)
+                .value_name("PATH")
+                .conflicts_with("password_stdin")
+                .help("Read the image container password from a file; remove one trailing line ending."),
+        )
+        .arg(
+            clap::Arg::new("password_stdin")
+                .long("password-stdin")
+                .global(true)
+                .action(clap::ArgAction::SetTrue)
+                .help("Read the image container password from stdin; remove one trailing line ending."),
+        )
 }

@@ -10,6 +10,11 @@ pub mod folder_impl;
 pub mod ntfs_impl;
 pub mod volume;
 pub mod volume_bitlocker;
+pub mod walk;
 pub use filesystem::{
     DirectoryEntryLimitError, File, FileIdentity, FileKind, Filesystem, FilesystemSourceView,
+};
+pub use walk::{
+    WalkAction, WalkCallback, WalkContext, WalkError, WalkErrorKind, WalkEvent, WalkIssue,
+    WalkIssueCode, WalkOptions, WalkReport, WalkResult, WalkRoot, WalkStage, WalkStatus,
 };

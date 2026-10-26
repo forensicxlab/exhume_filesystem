@@ -5,7 +5,7 @@
 
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use clap_num::maybe_hex;
-use exhume_body::Body;
+use exhume_body::{Body, BodyOpenOptions};
 use exhume_filesystem::detected_fs::{DetectedFs, detect_filesystem};
 use exhume_filesystem::export::{
     ExportControl, ExportOptions, ExportProgress, ExportProvenance, ExportStage, RawAllocation,
@@ -73,7 +73,7 @@ pub(crate) struct ExportVolumeArgs {
 }
 
 pub(crate) fn command() -> Command {
-    Command::new("export-volume")
+    crate::password_args(Command::new("export-volume")
         .about("Export a physical partition or a transformed, decrypted volume view")
         .long_about(
             "Export one bounded partition as a standalone RAW image. The physical view preserves encrypted bytes; the decrypted view applies the selected volume transform. GPT metadata is not included in the output.",
@@ -93,7 +93,7 @@ pub(crate) fn command() -> Command {
             Arg::new("format")
                 .short('f')
                 .long("format")
-                .value_parser(["auto", "raw", "ewf", "vmdk", "aff", "aff4"])
+                .value_parser(["auto", "raw", "ewf", "vmdk", "aff", "aff4", "aff4l", "qcow2", "vhdx"])
                 .default_value("auto")
                 .help("Source image format"),
         )
@@ -150,7 +150,7 @@ pub(crate) fn command() -> Command {
             Arg::new("fvek_stdin")
                 .long("fvek-stdin")
                 .action(ArgAction::SetTrue)
-                .conflicts_with("fvek_file")
+                .conflicts_with_all(["fvek_file", "password_stdin"])
                 .help("Read a hexadecimal BitLocker FVEK from standard input"),
         )
         .arg(
@@ -234,6 +234,7 @@ pub(crate) fn command() -> Command {
                 .default_value("3")
                 .help("Reusable streaming buffers in the bounded pipeline (1-32; default: 3)"),
         )
+    )
 }
 
 pub(crate) fn parse(matches: &ArgMatches) -> Result<ExportVolumeArgs, String> {
@@ -357,10 +358,13 @@ pub(crate) fn parse(matches: &ArgMatches) -> Result<ExportVolumeArgs, String> {
     })
 }
 
-pub(crate) fn run(mut arguments: ExportVolumeArgs) -> Result<(), String> {
+pub(crate) fn run_with_options(
+    mut arguments: ExportVolumeArgs,
+    options: &BodyOpenOptions,
+) -> Result<(), String> {
     if cfg!(debug_assertions) {
-        eprintln!(
-            "WARNING: this exporter is running with debug assertions and can be dramatically slower. Use `cargo run --release -p exhume_filesystem -- export-volume ...` for production exports."
+        log::warn!(
+            "this exporter is running with debug assertions and can be dramatically slower. Use `cargo run --release -p exhume_filesystem -- export-volume ...` for production exports."
         );
     }
     let source_path = fs::canonicalize(&arguments.body).map_err(|error| {
@@ -380,9 +384,10 @@ pub(crate) fn run(mut arguments: ExportVolumeArgs) -> Result<(), String> {
         ));
     }
 
-    let body = Body::try_new(
+    let body = Body::open(
         source_path.to_string_lossy().into_owned(),
         &arguments.format,
+        options,
     )
     .map_err(|error| format!("cannot open source evidence: {error}"))?;
     let backing_paths = body
@@ -823,8 +828,8 @@ fn warn_if_source_and_output_share_device(
 ) -> Result<(), String> {
     let same_device_sources = source_paths_on_output_device(backing_paths, output_path)?;
     if !same_device_sources.is_empty() {
-        eprintln!(
-            "WARNING: source evidence and output resolve to the same filesystem/device. Concurrent reads and writes may reduce throughput even when different folders are used; a separate physical SSD is recommended. Matching source: {}",
+        log::warn!(
+            "source evidence and output resolve to the same filesystem/device. Concurrent reads and writes may reduce throughput even when different folders are used; a separate physical SSD is recommended. Matching source: {}",
             same_device_sources
                 .iter()
                 .map(|path| path.display().to_string())
